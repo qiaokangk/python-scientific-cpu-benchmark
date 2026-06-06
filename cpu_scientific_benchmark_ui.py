@@ -276,17 +276,22 @@ class FigurePane(QWidget):
         super().__init__(parent)
         self.figure = Figure(figsize=(8.8, 5.8), dpi=120)
         self.canvas = HighResolutionCanvas(self.figure)
+        self.canvas_scroll = QScrollArea()
+        self.canvas_scroll.setWidgetResizable(True)
+        self.canvas_scroll.setFrameShape(QT_NO_FRAME)
+        self.canvas_scroll.setAlignment(QT_ALIGN_CENTER)
+        self.canvas_scroll.setWidget(self.canvas)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.canvas_scroll, 1)
         self.draw_empty(title)
 
     def set_row_count(self, row_count: int) -> None:
-        height_px = bench.horizontal_bar_canvas_height(row_count)
-        self.canvas.setMinimumSize(QSize(760, height_px))
-        self.figure.set_size_inches(9.6, bench.horizontal_bar_fig_height(row_count), forward=True)
+        _ = row_count
+        self.canvas.setMinimumSize(QSize(660, 430))
+        self.figure.set_size_inches(8.8, 5.8, forward=True)
 
     def draw_empty(self, message: str) -> None:
         self.set_row_count(8)
@@ -1222,9 +1227,9 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     window = BenchmarkWindow(args.config)
     if args.test_build:
-        window.show()
+        window.resize(1400, 900)
+        window.centralWidget().adjustSize()
         app.processEvents()
-        window.close()
         return 0
     window.show()
     if hasattr(app, "exec"):

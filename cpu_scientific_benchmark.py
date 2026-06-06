@@ -101,6 +101,35 @@ BENCHMARK_LABELS = {
 }
 
 
+PLOT_LABELS = {
+    "dense_matmul_float64": "Matmul f64",
+    "dense_matmul_complex128": "Matmul c128",
+    "dense_hermitian_eigvalsh": "NumPy Hermitian eig",
+    "scipy_hermitian_eigh": "SciPy Hermitian eig",
+    "dense_nonhermitian_eigvals": "NumPy non-Hermitian eig",
+    "scipy_nonhermitian_eigvals": "SciPy non-Hermitian eig",
+    "dense_svd": "NumPy SVD values",
+    "scipy_svdvals": "SciPy SVD values",
+    "dense_cholesky": "Cholesky",
+    "dense_qr": "QR",
+    "linear_solve": "Linear solve",
+    "least_squares_lstsq": "Least-squares",
+    "fft_3d_complex128": "3D FFT c128",
+    "einsum_tensor_contraction": "einsum contraction",
+    "vectorized_elementwise": "elementwise ufunc",
+    "reduction_norm": "reduction/norm",
+    "sort_argsort": "argsort f64",
+    "python_loop": "Python loop",
+    "numba_njit_loop": "Numba njit loop",
+    "numba_prange_loop": "Numba prange loop",
+    "sparse_matvec_csr": "CSR matvec",
+    "sparse_eigsh": "sparse eigsh",
+    "scipy_signal_fftconvolve": "fftconvolve",
+    "scipy_ndimage_gaussian_filter": "Gaussian filter",
+    "scipy_distance_cdist": "cdist distances",
+}
+
+
 _numba_prange = range
 
 
@@ -1244,7 +1273,7 @@ def pdf_label(text: str, width: int = 34) -> str:
 
 
 def compact_benchmark_label(name: str, width: int = 34) -> str:
-    return pdf_label(BENCHMARK_LABELS.get(name, name), width=width)
+    return pdf_label(PLOT_LABELS.get(name, BENCHMARK_LABELS.get(name, name)), width=width)
 
 
 TIMING_BAR_COLORS = ("#4C78A8", "#F58518", "#54A24B", "#B279A2")
@@ -1254,16 +1283,12 @@ def horizontal_bar_fig_height(row_count: int, *, base: float = 4.8, per_row: flo
     return max(base, min(15.5, 1.5 + max(1, row_count) * per_row))
 
 
-def horizontal_bar_canvas_height(row_count: int, *, base: int = 460, per_row: int = 42) -> int:
-    return max(base, min(1800, 160 + max(1, row_count) * per_row))
-
-
 def ytick_font_size(row_count: int) -> int:
     if row_count >= 24:
-        return 8
+        return 6
     if row_count >= 18:
-        return 8
-    return 9
+        return 7
+    return 8
 
 
 def shade_plot_rows(ax: Any, count: int) -> None:
@@ -1372,7 +1397,7 @@ def plot_timing_bars(
 
 
 def adjust_timing_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.40, right=0.98, top=0.92, bottom=0.10)
+    fig.subplots_adjust(left=0.24, right=0.985, top=0.90, bottom=0.13)
 
 
 def plot_speedup_bars(
@@ -1420,7 +1445,7 @@ def plot_speedup_bars(
 
 
 def adjust_horizontal_bar_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.40, right=0.96, top=0.92, bottom=0.10)
+    fig.subplots_adjust(left=0.24, right=0.975, top=0.90, bottom=0.13)
 
 
 def metric_units_by_order(rows: list[dict[str, Any]], names: list[str]) -> list[str]:
