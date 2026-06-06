@@ -1,0 +1,22 @@
+# Benchmark outputs
+benchmark_results/
+benchmark_results_*/
+rendered_pdf_pages/
+*_effective_config.json
+*_results.json
+*_report.txt
+*_plots.pdf
+*_worker_*.json
+*_worker_*.log
+
+# Python and local caches
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+.pytest_cache/
+
+# Local OS/editor files
+.DS_Store
+*.swp
+*.swo

@@ -1,0 +1,176 @@
+{
+  "benchmark": {
+    "calibration_max_inner_loops": 100000,
+    "enforce_threadpoolctl": true,
+    "execution_order": "by_benchmark",
+    "gc_between_repeats": true,
+    "max_memory_gb": 1.5,
+    "multi_thread_count": "logical",
+    "random_seed": 20260606,
+    "repeats": 1,
+    "target_case_s": 0.0,
+    "target_repeat_s": 0.0,
+    "thread_modes": [
+      "single",
+      "multi"
+    ],
+    "warmups": 0
+  },
+  "modules": {
+    "dense_cholesky": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 192
+    },
+    "dense_hermitian_eigvalsh": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 192
+    },
+    "dense_matmul_complex128": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 192
+    },
+    "dense_matmul_float64": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 256
+    },
+    "dense_nonhermitian_eigvals": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 128
+    },
+    "dense_qr": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 192
+    },
+    "dense_svd": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 160
+    },
+    "einsum_tensor_contraction": {
+      "a": 10,
+      "b": 10,
+      "c": 24,
+      "d": 12,
+      "e": 8,
+      "enabled": true,
+      "inner_loops": 1
+    },
+    "fft_3d_complex128": {
+      "backend": "scipy_if_available",
+      "enabled": true,
+      "inner_loops": 1,
+      "shape": [
+        48,
+        48,
+        32
+      ],
+      "use_scipy_workers": false
+    },
+    "least_squares_lstsq": {
+      "enabled": true,
+      "inner_loops": 1,
+      "m": 360,
+      "n": 120,
+      "nrhs": 2
+    },
+    "linear_solve": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 192,
+      "nrhs": 4
+    },
+    "numba_njit_loop": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 500000
+    },
+    "numba_prange_loop": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 1000000
+    },
+    "python_loop": {
+      "enabled": true,
+      "inner_loops": 1,
+      "iterations": 200000
+    },
+    "reduction_norm": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 300000
+    },
+    "scipy_distance_cdist": {
+      "d": 8,
+      "enabled": true,
+      "inner_loops": 1,
+      "m": 300,
+      "n": 120
+    },
+    "scipy_ndimage_gaussian_filter": {
+      "enabled": true,
+      "inner_loops": 1,
+      "shape": [
+        256,
+        256
+      ],
+      "sigma": 1.5
+    },
+    "scipy_signal_fftconvolve": {
+      "enabled": true,
+      "inner_loops": 1,
+      "kernel_shape": [
+        17,
+        17
+      ],
+      "shape": [
+        192,
+        192
+      ]
+    },
+    "sort_argsort": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 80000
+    },
+    "sparse_eigsh": {
+      "enabled": true,
+      "inner_loops": 1,
+      "k": 3,
+      "maxiter": 100,
+      "n": 500,
+      "tol": 1e-06
+    },
+    "sparse_matvec_csr": {
+      "enabled": true,
+      "inner_loops": 1,
+      "loops": 3,
+      "n": 8000,
+      "nnz_per_row": 6
+    },
+    "vectorized_elementwise": {
+      "enabled": true,
+      "inner_loops": 1,
+      "n": 200000
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "interval_s": 0.25,
+    "per_cpu": false,
+    "process_cpu": true,
+    "process_memory": true
+  },
+  "output": {
+    "directory": "benchmark_results_smoke",
+    "make_json": true,
+    "make_pdf": true,
+    "make_text": true,
+    "prefix": "cpu_python_scientific_smoke"
+  }
+}
