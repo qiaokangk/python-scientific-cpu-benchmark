@@ -155,8 +155,6 @@ def default_config() -> dict[str, Any]:
             "target_case_s": 10.0,
             "target_repeat_s": 0.0,
             "calibration_max_inner_loops": 100_000,
-            "auto_thread_regression_guard": True,
-            "auto_thread_regression_factor": 1.05,
         },
         "monitoring": {
             "enabled": True,
@@ -454,7 +452,7 @@ def resolve_thread_count(value: Any, system_info: dict[str, Any]) -> int:
     logical = int(system_info.get("logical_cpu_count") or os.cpu_count() or 1)
     physical_value = system_info.get("physical_cpu_count")
     physical = int(physical_value) if physical_value else logical
-    if text in {"auto", "default", "library", "unset", "none"}:
+    if text in {"auto", "default", "library", "inherit", "none"}:
         return 0
     if text in {"single", "one", "1"}:
         return 1
@@ -510,7 +508,7 @@ def is_auto_thread_count(thread_count: Any) -> bool:
     try:
         return int(thread_count) <= 0
     except Exception:
-        return str(thread_count).strip().lower() in {"auto", "default", "library", "unset", "none"}
+        return str(thread_count).strip().lower() in {"auto", "default", "library", "inherit", "none"}
 
 
 def format_thread_count(thread_count: Any) -> str:
@@ -524,10 +522,6 @@ def format_thread_count(thread_count: Any) -> str:
 
 def configure_thread_env_dict(env: dict[str, str], thread_count: int) -> None:
     if is_auto_thread_count(thread_count):
-        for var in THREAD_ENV_VARS:
-            env.pop(var, None)
-        env.pop("OMP_DYNAMIC", None)
-        env.pop("MKL_DYNAMIC", None)
         return
     for var in THREAD_ENV_VARS:
         env[var] = str(int(thread_count))
@@ -969,7 +963,6 @@ def write_benchmark_outputs(
     prefix: str,
     output_cfg: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    apply_auto_thread_regression_guard(aggregate)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = cli_output_paths(output_dir, prefix)
     write_json(paths["effective_config"], aggregate.get("config", {}))
@@ -1061,10 +1054,11 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
         if observed_cores is None and summary.get("process_cpu_max_percent") is not None:
             observed_cores = float(summary["process_cpu_max_percent"]) / 100.0
         pool_text = ", ".join(pool_parts) if pool_parts else "no threadpoolctl data"
+        env_text = format_thread_env_values(run.get("environment", {}))
         observed_text = f"{observed_cores:.2f}" if observed_cores is not None else "n/a"
         lines.append(
             f"  {label}: requested={expected}, observed_peak_process_cores~{observed_text}, "
-            f"threadpools=[{pool_text}]"
+            f"threadpools=[{pool_text}], env=[{env_text}]"
         )
     lines.append("")
 
@@ -1116,12 +1110,6 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
             "  Target timed case: disabled; one call per timed repeat unless inner_loops is set"
         )
     lines.append(f"  Max estimated memory per case: {benchmark_cfg.get('max_memory_gb')} GiB")
-    if bool(benchmark_cfg.get("auto_thread_regression_guard", True)):
-        factor = float(benchmark_cfg.get("auto_thread_regression_factor", 1.05) or 1.05)
-        lines.append(
-            f"  Auto thread regression guard: enabled "
-            f"(skip auto multi rows slower than {factor:.2f}x single)"
-        )
     lines.append(f"  Thread env vars: {', '.join(THREAD_ENV_VARS)}")
     lines.append("")
 
@@ -1171,8 +1159,7 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("Notes")
     lines.append("  - Speedup is computed against the first successful single-thread result with the same benchmark name.")
     lines.append("  - Single mode strictly sets numerical thread environment variables to 1 before importing NumPy/SciPy.")
-    lines.append("  - Multi mode defaults to auto: thread environment variables are left unset and libraries choose their own thread counts.")
-    lines.append("  - Auto multi rows that are slower than single beyond the guard threshold are skipped from plots; measured values remain in JSON.")
+    lines.append("  - Multi mode defaults to auto: thread environment variables are inherited unchanged and no threadpoolctl limit is applied.")
     lines.append("  - Python scalar loops do not use BLAS/OpenMP threads and are included as interpreter overhead baselines.")
     lines.append("  - The Numba prange benchmark uses only scalar arithmetic inside prange; nested NumPy/SciPy/BLAS-style calls are rejected.")
     lines.append("  - Numba JIT init time is reported separately and is not included in the timed runtime mean.")
@@ -1181,99 +1168,6 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("  - Mean/call is one kernel call; Calls is the timed call count selected for that case.")
     lines.append("  - With target_case_s > 0, call counts are auto-calibrated per machine/thread mode; compare Mean/call across machines.")
     return "\n".join(lines) + "\n"
-
-
-AUTO_REGRESSION_RAW_KEYS = (
-    "times_s",
-    "batch_times_s",
-    "mean_s",
-    "std_s",
-    "min_s",
-    "batch_mean_s",
-    "batch_std_s",
-    "batch_min_s",
-    "timed_total_s",
-    "metric_name",
-    "metric_value",
-    "checksum",
-    "repeats",
-    "warmups",
-    "inner_loops",
-    "total_calls",
-    "target_case_s",
-    "target_repeat_s",
-)
-
-
-def apply_auto_thread_regression_guard(aggregate: dict[str, Any]) -> None:
-    """Mark auto-thread rows that regress badly versus single as skipped.
-
-    The measured numbers remain in JSON under ``measured_auto_result`` so the
-    data is auditable, but plotting/report speedup logic treats these rows as
-    skipped. This avoids presenting an OpenBLAS/MKL/Accelerate auto-threading
-    regression as a meaningful multithread benchmark result.
-    """
-
-    benchmark_cfg = aggregate.get("config", {}).get("benchmark", {})
-    if not bool(benchmark_cfg.get("auto_thread_regression_guard", True)):
-        return
-    try:
-        factor = float(benchmark_cfg.get("auto_thread_regression_factor", 1.05) or 1.05)
-    except Exception:
-        factor = 1.05
-    factor = max(1.0, factor)
-
-    single_by_name: dict[str, dict[str, Any]] = {}
-    for run in aggregate.get("runs", []):
-        label = str(run.get("thread_label", "")).lower()
-        thread_count = run.get("thread_count", 0)
-        if label != "single" and not (
-            not is_auto_thread_count(thread_count) and int(thread_count or 0) == 1
-        ):
-            continue
-        for result in run.get("results", []):
-            if result.get("status") != "ok" or result.get("mean_s") is None:
-                continue
-            single_by_name.setdefault(str(result.get("name", "")), result)
-
-    for run in aggregate.get("runs", []):
-        label = str(run.get("thread_label", "")).lower()
-        if label != "multi" or not is_auto_thread_count(run.get("thread_count", 0)):
-            continue
-        for result in run.get("results", []):
-            if result.get("auto_thread_regression"):
-                continue
-            if result.get("status") != "ok" or result.get("mean_s") is None:
-                continue
-            baseline = single_by_name.get(str(result.get("name", "")))
-            if baseline is None or baseline.get("mean_s") is None:
-                continue
-            try:
-                mean_s = float(result["mean_s"])
-                single_s = float(baseline["mean_s"])
-            except Exception:
-                continue
-            if mean_s <= 0.0 or single_s <= 0.0:
-                continue
-            ratio = mean_s / single_s
-            if ratio <= factor:
-                continue
-
-            result["measured_auto_result"] = {
-                key: copy.deepcopy(result.get(key))
-                for key in AUTO_REGRESSION_RAW_KEYS
-                if key in result
-            }
-            result["auto_thread_regression"] = True
-            result["auto_thread_regression_factor"] = ratio
-            result["auto_thread_regression_single_mean_s"] = single_s
-            result["status"] = "skipped"
-            result["reason"] = (
-                f"auto multithread was {ratio:.2f}x slower than single "
-                f"({format_seconds(mean_s)} vs {format_seconds(single_s)}); "
-                "excluded from timing and speedup plots. Raw measured values are in "
-                "measured_auto_result."
-            )
 
 
 def result_rows(aggregate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1377,7 +1271,6 @@ def plot_timing_bars(
     for idx, mode in enumerate(plot_modes):
         means = []
         labels = []
-        skipped = []
         for name in plot_names:
             match = next(
                 (
@@ -1396,7 +1289,6 @@ def plot_timing_bars(
             )
             means.append(value)
             labels.append(format_seconds(value) if math.isfinite(value) else "")
-            skipped.append(bool(match and match.get("auto_thread_regression")))
         offsets = [y - 0.39 + height / 2.0 + idx * height for y in y_positions]
         bars = ax.barh(
             offsets,
@@ -1418,18 +1310,6 @@ def plot_timing_bars(
                     fontsize=8,
                     color="#222222",
                     clip_on=False,
-                    zorder=3,
-                )
-        for offset, is_skipped in zip(offsets, skipped):
-            if is_skipped:
-                ax.text(
-                    x_max * 0.015,
-                    offset,
-                    "skipped",
-                    va="center",
-                    ha="left",
-                    fontsize=8,
-                    color="#777777",
                     zorder=3,
                 )
 
@@ -2243,6 +2123,15 @@ def safe_optional(value: Any, fmt: str = ".3g") -> str:
     if number is None:
         return "n/a"
     return format(number, fmt)
+
+
+def format_thread_env_values(environment: dict[str, Any]) -> str:
+    parts = []
+    for var in THREAD_ENV_VARS:
+        value = environment.get(var)
+        if value is not None and str(value) != "":
+            parts.append(f"{var}={value}")
+    return ", ".join(parts) if parts else "none"
 
 
 def random_float64(np: Any, rng: Any, shape: tuple[int, ...]) -> Any:

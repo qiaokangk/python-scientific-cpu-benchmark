@@ -451,7 +451,6 @@ class BenchmarkWorker(QThread):
                             copied["t_s"] = offset_s
                         run["monitoring"]["samples"].append(copied)
                     run["results"].extend(worker_data.get("results", []))
-                bench.apply_auto_thread_regression_guard(aggregate)
                 done += 1
                 message = self._last_result_message(label, threads, name, run["results"])
                 self.aggregate_ready.emit(copy.deepcopy(aggregate), message, done, total)
@@ -463,7 +462,6 @@ class BenchmarkWorker(QThread):
             aggregate["status"] = "ok"
             message = "Benchmark completed."
 
-        bench.apply_auto_thread_regression_guard(aggregate)
         bench.write_benchmark_outputs(aggregate, output_dir, prefix, output_cfg)
         return aggregate, message
 

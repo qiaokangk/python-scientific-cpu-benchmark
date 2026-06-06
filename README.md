@@ -65,21 +65,17 @@ NUMBA_NUM_THREADS
 to `1`, and also applies a one-thread `threadpoolctl` limit when available.
 
 In default `multi` mode, `benchmark.multi_thread_count` is `auto`. The worker
-removes those thread environment variables and does not apply a threadpoolctl
-upper limit, so NumPy/SciPy/BLAS/LAPACK/OpenMP libraries use their normal
-automatic thread policy. The report records the library-reported threadpool
-state and observed peak process CPU cores from runtime monitoring.
+inherits the current process environment unchanged and does not apply a
+threadpoolctl upper limit, so NumPy/SciPy/BLAS/LAPACK/OpenMP libraries use the
+same automatic policy they would use in a normal script launched from that
+environment. The report records the inherited thread environment,
+library-reported threadpool state, and observed peak process CPU cores from
+runtime monitoring.
 
 You can still set `benchmark.multi_thread_count` to `logical`, `physical`, or
 an integer if you explicitly want a fixed upper limit, but this is not the
 standard default because some LAPACK workloads can become much slower when
 forced to too many threads.
-
-The default `auto_thread_regression_guard` keeps this transparent in plots: if
-the auto multithread result is more than `auto_thread_regression_factor` slower
-than the matching single-thread result, that row is marked as skipped for timing
-and speedup plots while the raw measured values remain in JSON under
-`measured_auto_result`.
 
 Numba kernels are compiled from module-level functions with `cache=True`.
 The first run creates cache files under `__pycache__`; later runs with the same
@@ -107,18 +103,14 @@ Important keys:
 - `benchmark.max_memory_gb`: skip cases whose estimated working set exceeds this.
 - `benchmark.thread_modes`: usually `["single", "multi"]`.
 - `benchmark.multi_thread_count`: `auto`, `logical`, `physical`, or an
-  integer. The standard default is `auto`: the multithread worker leaves
-  BLAS/LAPACK/OpenMP thread environment variables unset and records the actual
-  threadpool and CPU usage chosen by the numerical libraries. `single` mode
-  still strictly forces one numerical thread.
+  integer. The standard default is `auto`: the multithread worker does not set
+  or clear BLAS/LAPACK/OpenMP thread environment variables and records the
+  actual threadpool and CPU usage chosen by the numerical libraries. `single`
+  mode still strictly forces one numerical thread.
 - `benchmark.execution_order`: `by_benchmark` runs single/multithread cases
   next to each other for each workload. This is the default because it reduces
   thermal/order bias when comparing speedups. Use `by_thread_mode` to run the
   complete single-thread suite first and the complete multithread suite second.
-- `benchmark.auto_thread_regression_guard`: when true, auto-multithread rows
-  that are slower than single by more than the configured factor are marked as
-  skipped for plots, with raw measured data preserved in JSON.
-- `benchmark.auto_thread_regression_factor`: default `1.05`.
 - `monitoring.enabled`: record runtime CPU, frequency, and memory samples.
 - `monitoring.interval_s`: sampling interval for runtime monitoring.
 - `modules.<name>.enabled`: enable or disable a benchmark.
