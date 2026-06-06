@@ -283,7 +283,13 @@ class FigurePane(QWidget):
         layout.addWidget(self.canvas, 1)
         self.draw_empty(title)
 
+    def set_row_count(self, row_count: int) -> None:
+        height_px = bench.horizontal_bar_canvas_height(row_count)
+        self.canvas.setMinimumSize(QSize(760, height_px))
+        self.figure.set_size_inches(9.6, bench.horizontal_bar_fig_height(row_count), forward=True)
+
     def draw_empty(self, message: str) -> None:
+        self.set_row_count(8)
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         ax.axis("off")
@@ -1104,6 +1110,7 @@ class BenchmarkWindow(QMainWindow):
         if not names or not modes or not any(row.get("status") == "ok" for row in rows):
             self.timing_pane.draw_empty("No successful timing rows yet.")
             return
+        self.timing_pane.set_row_count(len(names))
         ax = fig.add_subplot(111)
         bench.plot_timing_bars(ax, rows, names=names, mode_labels=modes, label_width=30)
         bench.adjust_timing_figure(fig)
@@ -1124,6 +1131,7 @@ class BenchmarkWindow(QMainWindow):
         if not names:
             self.speedup_pane.draw_empty("Speedup appears after matching single and multithread results.")
             return
+        self.speedup_pane.set_row_count(len(names))
         ax = fig.add_subplot(111)
         bench.plot_speedup_bars(ax, rows, names=names, label_width=30)
         bench.adjust_horizontal_bar_figure(fig)
@@ -1145,6 +1153,7 @@ class BenchmarkWindow(QMainWindow):
             if not planned_names:
                 self.metric_pane.draw_empty("No throughput metrics yet.")
                 return
+            self.metric_pane.set_row_count(len(planned_names))
             ax = fig.add_subplot(111)
             bench.plot_metric_unit_bars(
                 ax,
@@ -1167,6 +1176,7 @@ class BenchmarkWindow(QMainWindow):
             if str(row.get("metric_name")) == unit
         }
         names = planned_names[:24] if planned_names else list(selected_by_name)[:24]
+        self.metric_pane.set_row_count(len(names))
         ax = fig.add_subplot(111)
         bench.plot_metric_unit_bars(ax, selected, names=names, unit=unit, label_width=30)
         bench.adjust_horizontal_bar_figure(fig)

@@ -1250,6 +1250,22 @@ def compact_benchmark_label(name: str, width: int = 34) -> str:
 TIMING_BAR_COLORS = ("#4C78A8", "#F58518", "#54A24B", "#B279A2")
 
 
+def horizontal_bar_fig_height(row_count: int, *, base: float = 4.8, per_row: float = 0.42) -> float:
+    return max(base, min(15.5, 1.5 + max(1, row_count) * per_row))
+
+
+def horizontal_bar_canvas_height(row_count: int, *, base: int = 460, per_row: int = 42) -> int:
+    return max(base, min(1800, 160 + max(1, row_count) * per_row))
+
+
+def ytick_font_size(row_count: int) -> int:
+    if row_count >= 24:
+        return 8
+    if row_count >= 18:
+        return 8
+    return 9
+
+
 def shade_plot_rows(ax: Any, count: int) -> None:
     for index in range(count):
         if index % 2:
@@ -1345,7 +1361,10 @@ def plot_timing_bars(
     ax.set_xlabel("Mean time per call (s, linear scale; shorter is faster)", fontsize=12)
     ax.set_title("Mean runtime by thread mode", fontsize=15)
     ax.set_yticks(y_positions)
-    ax.set_yticklabels([compact_benchmark_label(name, width=label_width) for name in plot_names], fontsize=9)
+    ax.set_yticklabels(
+        [compact_benchmark_label(name, width=label_width) for name in plot_names],
+        fontsize=ytick_font_size(len(plot_names)),
+    )
     ax.set_ylim(len(plot_names) - 0.5, -0.5)
     ax.set_xlim(0.0, x_max * 1.45)
     ax.grid(True, axis="x", alpha=0.25, zorder=1)
@@ -1353,7 +1372,7 @@ def plot_timing_bars(
 
 
 def adjust_timing_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.36, right=0.98, top=0.91, bottom=0.13)
+    fig.subplots_adjust(left=0.40, right=0.98, top=0.92, bottom=0.10)
 
 
 def plot_speedup_bars(
@@ -1382,7 +1401,10 @@ def plot_speedup_bars(
     ax.barh(range(len(values)), values, color="#4C78A8", zorder=2)
     ax.axvline(1.0, color="black", linewidth=0.8, zorder=3)
     ax.set_yticks(range(len(values)))
-    ax.set_yticklabels([compact_benchmark_label(name, width=label_width) for name in plot_names], fontsize=9)
+    ax.set_yticklabels(
+        [compact_benchmark_label(name, width=label_width) for name in plot_names],
+        fontsize=ytick_font_size(len(plot_names)),
+    )
     ax.set_ylim(len(plot_names) - 0.5, -0.5)
     ax.set_xlabel("Speedup vs single-thread", fontsize=12)
     ax.set_title("Multithread speedup", fontsize=15)
@@ -1398,7 +1420,7 @@ def plot_speedup_bars(
 
 
 def adjust_horizontal_bar_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.36, right=0.96, top=0.91, bottom=0.13)
+    fig.subplots_adjust(left=0.40, right=0.96, top=0.92, bottom=0.10)
 
 
 def metric_units_by_order(rows: list[dict[str, Any]], names: list[str]) -> list[str]:
@@ -1448,7 +1470,10 @@ def plot_metric_unit_bars(
     shade_plot_rows(ax, len(plot_names))
     ax.barh(range(len(values)), values, color="#54A24B", zorder=2)
     ax.set_yticks(range(len(values)))
-    ax.set_yticklabels([compact_benchmark_label(name, width=label_width) for name in plot_names], fontsize=9)
+    ax.set_yticklabels(
+        [compact_benchmark_label(name, width=label_width) for name in plot_names],
+        fontsize=ytick_font_size(len(plot_names)),
+    )
     ax.set_ylim(len(plot_names) - 0.5, -0.5)
     ax.set_xlabel(unit or "Throughput metric", fontsize=12)
     ax.set_title(title or (f"Throughput metrics ({unit})" if unit else "Throughput metrics"), fontsize=15)
@@ -1564,7 +1589,7 @@ def make_pdf_report(aggregate: dict[str, Any], pdf_path: Path) -> str | None:
         pdf.savefig(fig)
         plt.close(fig)
 
-        fig, ax = plt.subplots(figsize=(11, 8.5))
+        fig, ax = plt.subplots(figsize=(11, horizontal_bar_fig_height(len(names))))
         plot_timing_bars(ax, rows, names=names, label_width=30)
         adjust_timing_figure(fig)
         pdf.savefig(fig)
@@ -1576,7 +1601,7 @@ def make_pdf_report(aggregate: dict[str, Any], pdf_path: Path) -> str | None:
             if row.get("speedup") is not None and int(row.get("thread_count", 0)) != 1
         ]
         if speedup_rows:
-            fig, ax = plt.subplots(figsize=(11, 7))
+            fig, ax = plt.subplots(figsize=(11, horizontal_bar_fig_height(len(names))))
             plot_speedup_bars(ax, ok_rows, names=names, label_width=30)
             adjust_horizontal_bar_figure(fig)
             pdf.savefig(fig)
