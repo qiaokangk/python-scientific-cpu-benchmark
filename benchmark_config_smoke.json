@@ -27,6 +27,14 @@
       "inner_loops": 1,
       "n": 192
     },
+    "scipy_hermitian_eigh": {
+      "check_finite": false,
+      "driver": "evd",
+      "enabled": true,
+      "inner_loops": 1,
+      "input_seed_name": "dense_hermitian_eigvalsh",
+      "n": 192
+    },
     "dense_matmul_complex128": {
       "enabled": true,
       "inner_loops": 1,
@@ -42,6 +50,13 @@
       "inner_loops": 1,
       "n": 128
     },
+    "scipy_nonhermitian_eigvals": {
+      "check_finite": false,
+      "enabled": true,
+      "inner_loops": 1,
+      "input_seed_name": "dense_nonhermitian_eigvals",
+      "n": 128
+    },
     "dense_qr": {
       "enabled": true,
       "inner_loops": 1,
@@ -50,6 +65,14 @@
     "dense_svd": {
       "enabled": true,
       "inner_loops": 1,
+      "n": 160
+    },
+    "scipy_svdvals": {
+      "check_finite": false,
+      "enabled": true,
+      "inner_loops": 1,
+      "input_seed_name": "dense_svd",
+      "lapack_driver": "gesdd",
       "n": 160
     },
     "einsum_tensor_contraction": {

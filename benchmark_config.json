@@ -25,6 +25,13 @@
       "enabled": true,
       "n": 1536
     },
+    "scipy_hermitian_eigh": {
+      "check_finite": false,
+      "driver": "evd",
+      "enabled": true,
+      "input_seed_name": "dense_hermitian_eigvalsh",
+      "n": 1536
+    },
     "dense_matmul_complex128": {
       "enabled": true,
       "n": 1536
@@ -37,12 +44,25 @@
       "enabled": true,
       "n": 640
     },
+    "scipy_nonhermitian_eigvals": {
+      "check_finite": false,
+      "enabled": true,
+      "input_seed_name": "dense_nonhermitian_eigvals",
+      "n": 640
+    },
     "dense_qr": {
       "enabled": true,
       "n": 1800
     },
     "dense_svd": {
       "enabled": true,
+      "n": 1200
+    },
+    "scipy_svdvals": {
+      "check_finite": false,
+      "enabled": true,
+      "input_seed_name": "dense_svd",
+      "lapack_driver": "gesdd",
       "n": 1200
     },
     "einsum_tensor_contraction": {

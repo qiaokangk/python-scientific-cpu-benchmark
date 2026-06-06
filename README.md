@@ -125,6 +125,15 @@ hide real multithreaded speedups behind thread scheduling overhead. The smoke
 config remains small and is only for checking functionality, not for comparing
 single-thread and multithread performance.
 
+Default dense eig/SVD sizes are not the smoke sizes: NumPy/SciPy Hermitian
+eigenvalues use complex `n=1536`, NumPy/SciPy non-Hermitian eigenvalues use
+complex `n=640`, and NumPy/SciPy SVD singular values use float64 `n=1200`.
+The SciPy dense linalg modules use the same deterministic input matrices as
+their NumPy counterparts through `input_seed_name`, so NumPy/SciPy timing
+differences come from the library call path rather than different random data.
+`scipy_hermitian_eigh` defaults to `driver="evd"` and
+`scipy_svdvals` defaults to `lapack_driver="gesdd"`; both are configurable.
+
 Timing plots show `Mean/call`, so shorter bars are faster and cross-machine
 comparison is based on one kernel-call runtime. Bar labels show the actual timed
 call count selected for that case.

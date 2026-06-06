@@ -47,8 +47,11 @@ BENCHMARK_ORDER = (
     "dense_matmul_float64",
     "dense_matmul_complex128",
     "dense_hermitian_eigvalsh",
+    "scipy_hermitian_eigh",
     "dense_nonhermitian_eigvals",
+    "scipy_nonhermitian_eigvals",
     "dense_svd",
+    "scipy_svdvals",
     "dense_cholesky",
     "dense_qr",
     "linear_solve",
@@ -72,9 +75,12 @@ BENCHMARK_ORDER = (
 BENCHMARK_LABELS = {
     "dense_matmul_float64": "Dense matrix multiply, float64",
     "dense_matmul_complex128": "Dense matrix multiply, complex128",
-    "dense_hermitian_eigvalsh": "Dense Hermitian eigenvalues",
-    "dense_nonhermitian_eigvals": "Dense non-Hermitian eigenvalues",
-    "dense_svd": "Dense SVD singular values",
+    "dense_hermitian_eigvalsh": "NumPy dense Hermitian eigenvalues",
+    "scipy_hermitian_eigh": "SciPy dense Hermitian eigenvalues",
+    "dense_nonhermitian_eigvals": "NumPy dense non-Hermitian eigenvalues",
+    "scipy_nonhermitian_eigvals": "SciPy dense non-Hermitian eigenvalues",
+    "dense_svd": "NumPy dense SVD singular values",
+    "scipy_svdvals": "SciPy dense SVD singular values",
     "dense_cholesky": "Dense Cholesky factorization",
     "dense_qr": "Dense QR factorization",
     "linear_solve": "Dense linear solve",
@@ -174,8 +180,28 @@ def default_config() -> dict[str, Any]:
             "dense_matmul_float64": {"enabled": True, "n": 3072},
             "dense_matmul_complex128": {"enabled": True, "n": 1536},
             "dense_hermitian_eigvalsh": {"enabled": True, "n": 1536},
+            "scipy_hermitian_eigh": {
+                "enabled": True,
+                "n": 1536,
+                "driver": "evd",
+                "check_finite": False,
+                "input_seed_name": "dense_hermitian_eigvalsh",
+            },
             "dense_nonhermitian_eigvals": {"enabled": True, "n": 640},
+            "scipy_nonhermitian_eigvals": {
+                "enabled": True,
+                "n": 640,
+                "check_finite": False,
+                "input_seed_name": "dense_nonhermitian_eigvals",
+            },
             "dense_svd": {"enabled": True, "n": 1200},
+            "scipy_svdvals": {
+                "enabled": True,
+                "n": 1200,
+                "lapack_driver": "gesdd",
+                "check_finite": False,
+                "input_seed_name": "dense_svd",
+            },
             "dense_cholesky": {"enabled": True, "n": 3600},
             "dense_qr": {"enabled": True, "n": 1800},
             "linear_solve": {"enabled": True, "n": 3000, "nrhs": 32},
@@ -254,8 +280,11 @@ def smoke_config() -> dict[str, Any]:
     modules["dense_matmul_float64"]["n"] = 256
     modules["dense_matmul_complex128"]["n"] = 192
     modules["dense_hermitian_eigvalsh"]["n"] = 192
+    modules["scipy_hermitian_eigh"]["n"] = 192
     modules["dense_nonhermitian_eigvals"]["n"] = 128
+    modules["scipy_nonhermitian_eigvals"]["n"] = 128
     modules["dense_svd"]["n"] = 160
+    modules["scipy_svdvals"]["n"] = 160
     modules["dense_cholesky"]["n"] = 192
     modules["dense_qr"]["n"] = 192
     modules["linear_solve"].update({"n": 192, "nrhs": 4})
@@ -1531,7 +1560,7 @@ def make_pdf_report(aggregate: dict[str, Any], pdf_path: Path) -> str | None:
             family="monospace",
             fontsize=9,
         )
-        fig.tight_layout()
+        fig.subplots_adjust(left=0.03, right=0.98, top=0.98, bottom=0.03)
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -1608,6 +1637,7 @@ def run_worker(args: argparse.Namespace) -> int:
     import numpy as np
 
     scipy_module = None
+    scipy_linalg = None
     scipy_sparse = None
     scipy_sparse_linalg = None
     scipy_fft = None
@@ -1618,6 +1648,7 @@ def run_worker(args: argparse.Namespace) -> int:
     try:
         import scipy as scipy_module  # type: ignore
         import scipy.fft as scipy_fft  # type: ignore
+        import scipy.linalg as scipy_linalg  # type: ignore
         import scipy.ndimage as scipy_ndimage  # type: ignore
         import scipy.signal as scipy_signal  # type: ignore
         import scipy.sparse as scipy_sparse  # type: ignore
@@ -1675,6 +1706,7 @@ def run_worker(args: argparse.Namespace) -> int:
                     config,
                     np,
                     scipy_module,
+                    scipy_linalg,
                     scipy_sparse,
                     scipy_sparse_linalg,
                     scipy_fft,
@@ -1736,6 +1768,7 @@ def run_worker_one(args: argparse.Namespace) -> int:
     import numpy as np
 
     scipy_module = None
+    scipy_linalg = None
     scipy_sparse = None
     scipy_sparse_linalg = None
     scipy_fft = None
@@ -1746,6 +1779,7 @@ def run_worker_one(args: argparse.Namespace) -> int:
     try:
         import scipy as scipy_module  # type: ignore
         import scipy.fft as scipy_fft  # type: ignore
+        import scipy.linalg as scipy_linalg  # type: ignore
         import scipy.ndimage as scipy_ndimage  # type: ignore
         import scipy.signal as scipy_signal  # type: ignore
         import scipy.sparse as scipy_sparse  # type: ignore
@@ -1800,6 +1834,7 @@ def run_worker_one(args: argparse.Namespace) -> int:
                 config,
                 np,
                 scipy_module,
+                scipy_linalg,
                 scipy_sparse,
                 scipy_sparse_linalg,
                 scipy_fft,
@@ -1883,6 +1918,7 @@ def run_one_benchmark(
     config: dict[str, Any],
     np: Any,
     scipy_module: Any,
+    scipy_linalg: Any,
     scipy_sparse: Any,
     scipy_sparse_linalg: Any,
     scipy_fft: Any,
@@ -1902,10 +1938,20 @@ def run_one_benchmark(
             return bench_dense_matmul_complex128(name, module_cfg, global_cfg, np)
         if name == "dense_hermitian_eigvalsh":
             return bench_dense_hermitian_eigvalsh(name, module_cfg, global_cfg, np)
+        if name == "scipy_hermitian_eigh":
+            return bench_scipy_hermitian_eigh(
+                name, module_cfg, global_cfg, np, scipy_linalg
+            )
         if name == "dense_nonhermitian_eigvals":
             return bench_dense_nonhermitian_eigvals(name, module_cfg, global_cfg, np)
+        if name == "scipy_nonhermitian_eigvals":
+            return bench_scipy_nonhermitian_eigvals(
+                name, module_cfg, global_cfg, np, scipy_linalg
+            )
         if name == "dense_svd":
             return bench_dense_svd(name, module_cfg, global_cfg, np)
+        if name == "scipy_svdvals":
+            return bench_scipy_svdvals(name, module_cfg, global_cfg, np, scipy_linalg)
         if name == "dense_cholesky":
             return bench_dense_cholesky(name, module_cfg, global_cfg, np)
         if name == "dense_qr":
@@ -1980,6 +2026,10 @@ def data_seed_for(global_cfg: dict[str, Any], name: str, salt: str = "") -> int:
 def rng_for(np: Any, global_cfg: dict[str, Any], name: str, salt: str = "") -> Any:
     seed = data_seed_for(global_cfg, name, salt=salt)
     return np.random.Generator(np.random.PCG64(seed))
+
+
+def input_seed_name_for(module_cfg: dict[str, Any], default_name: str) -> str:
+    return str(module_cfg.get("input_seed_name", default_name))
 
 
 def repeats_for(module_cfg: dict[str, Any], global_cfg: dict[str, Any]) -> tuple[int, int]:
@@ -2223,6 +2273,56 @@ def bench_dense_hermitian_eigvalsh(name: str, module_cfg: dict[str, Any], global
     )
 
 
+def bench_scipy_hermitian_eigh(
+    name: str,
+    module_cfg: dict[str, Any],
+    global_cfg: dict[str, Any],
+    np: Any,
+    scipy_linalg: Any,
+) -> dict[str, Any]:
+    if scipy_linalg is None:
+        return skipped_result(name, "SciPy linalg is not available", module_cfg)
+    n = int(module_cfg.get("n", 768))
+    driver_text = str(module_cfg.get("driver", "evd")).strip().lower()
+    driver = None if driver_text in {"", "none", "default", "auto"} else driver_text
+    check_finite = bool(module_cfg.get("check_finite", False))
+    estimate = 3.0 * n * n * 16
+    skipped = check_memory_or_skip(name, module_cfg, global_cfg, estimate)
+    if skipped:
+        return skipped
+    seed_name = input_seed_name_for(module_cfg, "dense_hermitian_eigvalsh")
+    rng = rng_for(np, global_cfg, seed_name)
+    x = random_complex128(np, rng, (n, n)) / math.sqrt(max(1, n))
+    h = 0.5 * (x + x.conj().T)
+    h[np.diag_indices(n)] += np.linspace(0.0, 1.0, n)
+
+    eigh_kwargs = {"eigvals_only": True, "check_finite": check_finite}
+    if driver is not None:
+        eigh_kwargs["driver"] = driver
+
+    def func() -> float:
+        values = scipy_linalg.eigh(h, **eigh_kwargs)
+        return float(values[0])
+
+    return timed_result(
+        name,
+        module_cfg,
+        global_cfg,
+        {
+            "n": n,
+            "dtype": "complex128",
+            "driver": driver or "scipy_default",
+            "check_finite": check_finite,
+            "input_seed_name": seed_name,
+            "data_seed": data_seed_for(global_cfg, seed_name),
+        },
+        estimate,
+        func,
+        "N^3/s",
+        float(n**3),
+    )
+
+
 def bench_dense_nonhermitian_eigvals(name: str, module_cfg: dict[str, Any], global_cfg: dict[str, Any], np: Any) -> dict[str, Any]:
     n = int(module_cfg.get("n", 448))
     estimate = 3.0 * n * n * 16
@@ -2248,6 +2348,47 @@ def bench_dense_nonhermitian_eigvals(name: str, module_cfg: dict[str, Any], glob
     )
 
 
+def bench_scipy_nonhermitian_eigvals(
+    name: str,
+    module_cfg: dict[str, Any],
+    global_cfg: dict[str, Any],
+    np: Any,
+    scipy_linalg: Any,
+) -> dict[str, Any]:
+    if scipy_linalg is None:
+        return skipped_result(name, "SciPy linalg is not available", module_cfg)
+    n = int(module_cfg.get("n", 448))
+    check_finite = bool(module_cfg.get("check_finite", False))
+    estimate = 3.5 * n * n * 16
+    skipped = check_memory_or_skip(name, module_cfg, global_cfg, estimate)
+    if skipped:
+        return skipped
+    seed_name = input_seed_name_for(module_cfg, "dense_nonhermitian_eigvals")
+    rng = rng_for(np, global_cfg, seed_name)
+    a = random_complex128(np, rng, (n, n)) / math.sqrt(max(1, n))
+
+    def func() -> float:
+        values = scipy_linalg.eigvals(a, check_finite=check_finite)
+        return float(values[0].real)
+
+    return timed_result(
+        name,
+        module_cfg,
+        global_cfg,
+        {
+            "n": n,
+            "dtype": "complex128",
+            "check_finite": check_finite,
+            "input_seed_name": seed_name,
+            "data_seed": data_seed_for(global_cfg, seed_name),
+        },
+        estimate,
+        func,
+        "N^3/s",
+        float(n**3),
+    )
+
+
 def bench_dense_svd(name: str, module_cfg: dict[str, Any], global_cfg: dict[str, Any], np: Any) -> dict[str, Any]:
     n = int(module_cfg.get("n", 640))
     estimate = 2.5 * n * n * 8
@@ -2266,6 +2407,58 @@ def bench_dense_svd(name: str, module_cfg: dict[str, Any], global_cfg: dict[str,
         module_cfg,
         global_cfg,
         {"n": n, "dtype": "float64", "compute_uv": False},
+        estimate,
+        func,
+        "N^3/s",
+        float(n**3),
+    )
+
+
+def bench_scipy_svdvals(
+    name: str,
+    module_cfg: dict[str, Any],
+    global_cfg: dict[str, Any],
+    np: Any,
+    scipy_linalg: Any,
+) -> dict[str, Any]:
+    if scipy_linalg is None:
+        return skipped_result(name, "SciPy linalg is not available", module_cfg)
+    n = int(module_cfg.get("n", 640))
+    lapack_driver = str(module_cfg.get("lapack_driver", "gesdd")).strip().lower()
+    if lapack_driver not in {"gesdd", "gesvd"}:
+        lapack_driver = "gesdd"
+    check_finite = bool(module_cfg.get("check_finite", False))
+    estimate = 3.0 * n * n * 8
+    skipped = check_memory_or_skip(name, module_cfg, global_cfg, estimate)
+    if skipped:
+        return skipped
+    seed_name = input_seed_name_for(module_cfg, "dense_svd")
+    rng = rng_for(np, global_cfg, seed_name)
+    a = random_float64(np, rng, (n, n)) / math.sqrt(max(1, n))
+
+    def func() -> float:
+        values = scipy_linalg.svd(
+            a,
+            compute_uv=False,
+            full_matrices=False,
+            check_finite=check_finite,
+            lapack_driver=lapack_driver,
+        )
+        return float(values[0])
+
+    return timed_result(
+        name,
+        module_cfg,
+        global_cfg,
+        {
+            "n": n,
+            "dtype": "float64",
+            "compute_uv": False,
+            "lapack_driver": lapack_driver,
+            "check_finite": check_finite,
+            "input_seed_name": seed_name,
+            "data_seed": data_seed_for(global_cfg, seed_name),
+        },
         estimate,
         func,
         "N^3/s",
