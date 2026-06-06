@@ -1417,6 +1417,7 @@ def plot_timing_bars(
         and float(row["mean_s"]) > 0
     ]
     x_max = max([1.0e-12] + all_means)
+    x_limit = x_max * 1.06
     shade_plot_rows(ax, len(plot_names))
 
     for idx, mode in enumerate(plot_modes):
@@ -1452,15 +1453,16 @@ def plot_timing_bars(
         for bar, label_text in zip(bars, labels):
             value = bar.get_width()
             if math.isfinite(value) and label_text:
+                label_inside = value > 0.82 * x_limit
                 ax.text(
-                    value,
+                    value - x_limit * 0.012 if label_inside else value,
                     bar.get_y() + bar.get_height() / 2.0,
-                    f"  {label_text}",
+                    label_text if label_inside else f"  {label_text}",
                     va="center",
-                    ha="left",
+                    ha="right" if label_inside else "left",
                     fontsize=8,
-                    color="#222222",
-                    clip_on=False,
+                    color="white" if label_inside else "#222222",
+                    clip_on=True,
                     zorder=3,
                 )
 
@@ -1472,13 +1474,13 @@ def plot_timing_bars(
         fontsize=ytick_font_size(len(plot_names)),
     )
     ax.set_ylim(len(plot_names) - 0.5, -0.5)
-    ax.set_xlim(0.0, x_max * 1.45)
+    ax.set_xlim(0.0, x_limit)
     ax.grid(True, axis="x", alpha=0.25, zorder=1)
     ax.legend(loc="lower right", fontsize=10)
 
 
 def adjust_timing_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.24, right=0.985, top=0.90, bottom=0.13)
+    fig.subplots_adjust(left=0.18, right=0.99, top=0.90, bottom=0.13)
 
 
 def plot_speedup_bars(
@@ -1526,7 +1528,7 @@ def plot_speedup_bars(
 
 
 def adjust_horizontal_bar_figure(fig: Any) -> None:
-    fig.subplots_adjust(left=0.24, right=0.975, top=0.90, bottom=0.13)
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.90, bottom=0.13)
 
 
 def metric_units_by_order(rows: list[dict[str, Any]], names: list[str]) -> list[str]:
