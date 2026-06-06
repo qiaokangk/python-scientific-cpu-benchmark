@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 os.environ.setdefault(
-    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "python_numerical_benchmark_matplotlib")
+    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "python_scientific_cpu_benchmark_matplotlib")
 )
 if "--test-build" in sys.argv:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
