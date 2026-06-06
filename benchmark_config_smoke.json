@@ -2,7 +2,7 @@
   "benchmark": {
     "calibration_max_inner_loops": 100000,
     "enforce_threadpoolctl": true,
-    "execution_order": "by_benchmark",
+    "execution_order": "by_thread_mode",
     "gc_between_repeats": true,
     "max_memory_gb": 1.5,
     "multi_thread_count": "auto",

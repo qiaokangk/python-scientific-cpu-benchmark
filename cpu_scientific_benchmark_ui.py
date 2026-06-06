@@ -275,6 +275,7 @@ class FigurePane(QWidget):
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.figure = Figure(figsize=(8.8, 5.8), dpi=120)
+        self.figure.patch.set_facecolor("white")
         self.canvas = HighResolutionCanvas(self.figure)
         self.canvas_scroll = QScrollArea()
         self.canvas_scroll.setWidgetResizable(True)
@@ -291,15 +292,23 @@ class FigurePane(QWidget):
     def set_row_count(self, row_count: int) -> None:
         _ = row_count
         self.canvas.setMinimumSize(QSize(660, 430))
-        self.figure.set_size_inches(8.8, 5.8, forward=True)
+        self.canvas.updateGeometry()
+
+    def clear_figure(self) -> None:
+        self.figure.clear()
+        self.figure.patch.set_facecolor("white")
+
+    def finish_draw(self) -> None:
+        self.toolbar.update()
+        self.canvas.draw()
 
     def draw_empty(self, message: str) -> None:
         self.set_row_count(8)
-        self.figure.clear()
+        self.clear_figure()
         ax = self.figure.add_subplot(111)
         ax.axis("off")
         ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=16)
-        self.canvas.draw_idle()
+        self.finish_draw()
 
 
 class BenchmarkWorker(QThread):
@@ -367,104 +376,106 @@ class BenchmarkWorker(QThread):
         runs_by_label = {str(run["thread_label"]): run for run in aggregate["runs"]}
 
         script_path = Path(bench.__file__).resolve()
-        for index, name in enumerate(names, start=1):
+        execution_order = bench.normalize_execution_order(self.config)
+        cases = bench.iter_benchmark_cases(names, thread_modes, execution_order)
+        for case_index, (benchmark_index, name, _mode_index, mode) in enumerate(cases, start=1):
             if self._stop_requested:
                 break
-            for mode in thread_modes:
+            label = str(mode["name"])
+            threads = int(mode["threads"])
+            run = runs_by_label[label]
+            title = (
+                f"{case_index}/{total} {name} / {label} "
+                f"({bench.format_thread_count(threads)} thread(s))"
+            )
+            self.progress.emit(done, total, title)
+            offset_s = float(run.get("elapsed_s", 0.0) or 0.0)
+            worker_input = {
+                "config": self.config,
+                "thread_label": label,
+                "thread_count": threads,
+                "benchmark_name": name,
+            }
+            safe_label = _safe_filename(label)
+            item_tag = f"{case_index:02d}_{benchmark_index:02d}_{_safe_filename(name)}_{safe_label}"
+            worker_config_path = output_dir / f"{prefix}_ui_worker_{item_tag}_input.json"
+            worker_output_path = output_dir / f"{prefix}_ui_worker_{item_tag}_results.json"
+            worker_log_path = output_dir / f"{prefix}_ui_worker_{item_tag}.log"
+            bench.write_json(worker_config_path, worker_input)
+            env = bench.build_thread_env(threads, output_dir)
+            command = [
+                sys.executable,
+                str(script_path),
+                "--worker-one",
+                "--worker-config",
+                str(worker_config_path),
+                "--worker-output",
+                str(worker_output_path),
+            ]
+            started = time.perf_counter()
+            proc = subprocess.Popen(
+                command,
+                cwd=str(self.working_dir),
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            while proc.poll() is None:
                 if self._stop_requested:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
                     break
-                label = str(mode["name"])
-                threads = int(mode["threads"])
-                run = runs_by_label[label]
-                title = f"{index}/{len(names)} {name} / {label} ({bench.format_thread_count(threads)} thread(s))"
-                self.progress.emit(done, total, title)
-                offset_s = float(run.get("elapsed_s", 0.0) or 0.0)
-                worker_input = {
-                    "config": self.config,
-                    "thread_label": label,
-                    "thread_count": threads,
-                    "benchmark_name": name,
-                }
-                safe_label = _safe_filename(label)
-                item_tag = f"{index:02d}_{_safe_filename(name)}_{safe_label}"
-                worker_config_path = output_dir / f"{prefix}_ui_worker_{item_tag}_input.json"
-                worker_output_path = output_dir / f"{prefix}_ui_worker_{item_tag}_results.json"
-                worker_log_path = output_dir / f"{prefix}_ui_worker_{item_tag}.log"
-                bench.write_json(worker_config_path, worker_input)
-                env = bench.build_thread_env(threads, output_dir)
-                command = [
-                    sys.executable,
-                    str(script_path),
-                    "--worker-one",
-                    "--worker-config",
-                    str(worker_config_path),
-                    "--worker-output",
-                    str(worker_output_path),
-                ]
-                started = time.perf_counter()
-                proc = subprocess.Popen(
-                    command,
-                    cwd=str(self.working_dir),
-                    env=env,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                time.sleep(0.1)
+            stdout, stderr = proc.communicate()
+            elapsed = time.perf_counter() - started
+            run["elapsed_s"] = offset_s + elapsed
+            worker_log_path.write_text(
+                "STDOUT\n"
+                + (stdout or "")
+                + "\nSTDERR\n"
+                + (stderr or "")
+                + f"\nRETURN_CODE {proc.returncode}\n",
+                encoding="utf-8",
+            )
+            if self._stop_requested:
+                break
+            if proc.returncode != 0 or not worker_output_path.exists():
+                run["results"].append(
+                    {
+                        "name": name,
+                        "label": bench.BENCHMARK_LABELS.get(name, name),
+                        "status": "error",
+                        "reason": f"worker-one failed, see {worker_log_path}",
+                        "error": stderr,
+                        "sizes": copy.deepcopy(
+                            self.config.get("modules", {}).get(name, {})
+                        ),
+                    }
                 )
-                while proc.poll() is None:
-                    if self._stop_requested:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        break
-                    time.sleep(0.1)
-                stdout, stderr = proc.communicate()
-                elapsed = time.perf_counter() - started
-                run["elapsed_s"] = offset_s + elapsed
-                worker_log_path.write_text(
-                    "STDOUT\n"
-                    + (stdout or "")
-                    + "\nSTDERR\n"
-                    + (stderr or "")
-                    + f"\nRETURN_CODE {proc.returncode}\n",
-                    encoding="utf-8",
-                )
-                if self._stop_requested:
-                    break
-                if proc.returncode != 0 or not worker_output_path.exists():
-                    run["results"].append(
-                        {
-                            "name": name,
-                            "label": bench.BENCHMARK_LABELS.get(name, name),
-                            "status": "error",
-                            "reason": f"worker-one failed, see {worker_log_path}",
-                            "error": stderr,
-                            "sizes": copy.deepcopy(
-                                self.config.get("modules", {}).get(name, {})
-                            ),
-                        }
-                    )
-                    run["status"] = "error"
-                else:
-                    worker_data = bench.read_json(worker_output_path)
-                    if not run["package_info"]:
-                        run["package_info"] = worker_data.get("package_info", {})
-                    if not run["threadpool_info"]:
-                        run["threadpool_info"] = worker_data.get("threadpool_info", [])
-                    if not run["environment"]:
-                        run["environment"] = worker_data.get("environment", {})
-                    for sample in worker_data.get("monitoring", {}).get("samples", []):
-                        copied = copy.deepcopy(sample)
-                        try:
-                            copied["t_s"] = offset_s + float(copied.get("t_s", 0.0))
-                        except Exception:
-                            copied["t_s"] = offset_s
-                        run["monitoring"]["samples"].append(copied)
-                    run["results"].extend(worker_data.get("results", []))
-                done += 1
-                message = self._last_result_message(label, threads, name, run["results"])
-                self.aggregate_ready.emit(copy.deepcopy(aggregate), message, done, total)
+                run["status"] = "error"
+            else:
+                worker_data = bench.read_json(worker_output_path)
+                if not run["package_info"]:
+                    run["package_info"] = worker_data.get("package_info", {})
+                if not run["threadpool_info"]:
+                    run["threadpool_info"] = worker_data.get("threadpool_info", [])
+                if not run["environment"]:
+                    run["environment"] = worker_data.get("environment", {})
+                for sample in worker_data.get("monitoring", {}).get("samples", []):
+                    copied = copy.deepcopy(sample)
+                    try:
+                        copied["t_s"] = offset_s + float(copied.get("t_s", 0.0))
+                    except Exception:
+                        copied["t_s"] = offset_s
+                    run["monitoring"]["samples"].append(copied)
+                run["results"].extend(worker_data.get("results", []))
+            done += 1
+            message = self._last_result_message(label, threads, name, run["results"])
+            self.aggregate_ready.emit(copy.deepcopy(aggregate), message, done, total)
 
         if self._stop_requested:
             aggregate["status"] = "cancelled"
@@ -942,6 +953,7 @@ class BenchmarkWindow(QMainWindow):
                 "calibration_max_inner_loops": int(cfg.get("benchmark", {}).get("calibration_max_inner_loops", 100_000)),
                 "thread_modes": modes,
                 "multi_thread_count": self.multi_count_edit.text().strip() or "auto",
+                "execution_order": "by_thread_mode",
                 "enforce_threadpoolctl": self.enforce_threadpool_check.isChecked(),
                 "gc_between_repeats": self.gc_check.isChecked(),
             }
@@ -1109,7 +1121,7 @@ class BenchmarkWindow(QMainWindow):
     def draw_timing_plot(self, aggregate: dict[str, Any]) -> None:
         rows = bench.result_rows(aggregate)
         fig = self.timing_pane.figure
-        fig.clear()
+        self.timing_pane.clear_figure()
         names = self.planned_benchmark_names(aggregate)
         modes = self.planned_thread_labels(aggregate)
         if not names or not modes or not any(row.get("status") == "ok" for row in rows):
@@ -1119,7 +1131,7 @@ class BenchmarkWindow(QMainWindow):
         ax = fig.add_subplot(111)
         bench.plot_timing_bars(ax, rows, names=names, mode_labels=modes, label_width=30)
         bench.adjust_timing_figure(fig)
-        self.timing_pane.canvas.draw_idle()
+        self.timing_pane.finish_draw()
         self._mark_tab_updated(self.timing_pane)
 
     def draw_speedup_plot(self, aggregate: dict[str, Any]) -> None:
@@ -1131,7 +1143,7 @@ class BenchmarkWindow(QMainWindow):
             and int(row.get("thread_count", 0) or 0) != 1
         ]
         fig = self.speedup_pane.figure
-        fig.clear()
+        self.speedup_pane.clear_figure()
         names = self.planned_benchmark_names(aggregate)
         if not names:
             self.speedup_pane.draw_empty("Speedup appears after matching single and multithread results.")
@@ -1140,7 +1152,7 @@ class BenchmarkWindow(QMainWindow):
         ax = fig.add_subplot(111)
         bench.plot_speedup_bars(ax, rows, names=names, label_width=30)
         bench.adjust_horizontal_bar_figure(fig)
-        self.speedup_pane.canvas.draw_idle()
+        self.speedup_pane.finish_draw()
         self._mark_tab_updated(self.speedup_pane)
 
     def draw_metric_plot(self, aggregate: dict[str, Any]) -> None:
@@ -1152,7 +1164,7 @@ class BenchmarkWindow(QMainWindow):
             and row.get("metric_value") is not None
         ]
         fig = self.metric_pane.figure
-        fig.clear()
+        self.metric_pane.clear_figure()
         planned_names = self.planned_benchmark_names(aggregate)
         if not rows:
             if not planned_names:
@@ -1169,7 +1181,7 @@ class BenchmarkWindow(QMainWindow):
                 title="Throughput metrics will fill in as tests finish",
             )
             bench.adjust_horizontal_bar_figure(fig)
-            self.metric_pane.canvas.draw_idle()
+            self.metric_pane.finish_draw()
             self._mark_tab_updated(self.metric_pane)
             return
         multi = [row for row in rows if str(row.get("thread_label", "")).lower() == "multi"]
@@ -1185,12 +1197,12 @@ class BenchmarkWindow(QMainWindow):
         ax = fig.add_subplot(111)
         bench.plot_metric_unit_bars(ax, selected, names=names, unit=unit, label_width=30)
         bench.adjust_horizontal_bar_figure(fig)
-        self.metric_pane.canvas.draw_idle()
+        self.metric_pane.finish_draw()
         self._mark_tab_updated(self.metric_pane)
 
     def draw_monitor_plot(self, aggregate: dict[str, Any]) -> None:
         fig = self.monitor_pane.figure
-        fig.clear()
+        self.monitor_pane.clear_figure()
         runs = [run for run in aggregate.get("runs", []) if run.get("monitoring", {}).get("samples")]
         if not runs:
             self.monitor_pane.draw_empty("No runtime monitor samples yet.")
@@ -1200,7 +1212,7 @@ class BenchmarkWindow(QMainWindow):
         ax = fig.add_subplot(111)
         bench.plot_monitor_run(ax, run, logical_count)
         bench.adjust_monitor_figure(fig)
-        self.monitor_pane.canvas.draw_idle()
+        self.monitor_pane.finish_draw()
         self._mark_tab_updated(self.monitor_pane)
 
     def _intro_text(self) -> str:

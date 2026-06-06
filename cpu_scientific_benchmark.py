@@ -184,7 +184,7 @@ def default_config() -> dict[str, Any]:
             "max_memory_gb": 4.0,
             "thread_modes": ["single", "multi"],
             "multi_thread_count": "auto",
-            "execution_order": "by_benchmark",
+            "execution_order": "by_thread_mode",
             "enforce_threadpoolctl": True,
             "gc_between_repeats": True,
             "target_case_s": 10.0,
@@ -555,6 +555,34 @@ def resolve_thread_modes(config: dict[str, Any], system_info: dict[str, Any]) ->
     return unique
 
 
+def normalize_execution_order(config: dict[str, Any]) -> str:
+    execution_order = str(
+        config.get("benchmark", {}).get("execution_order", "by_thread_mode")
+    ).strip().lower()
+    if execution_order in {"by_thread_mode", "thread_mode", "thread_modes"}:
+        return "by_thread_mode"
+    if execution_order == "by_benchmark":
+        return "by_benchmark"
+    return "by_thread_mode"
+
+
+def iter_benchmark_cases(
+    names: list[str],
+    thread_modes: list[dict[str, Any]],
+    execution_order: str,
+) -> list[tuple[int, str, int, dict[str, Any]]]:
+    cases: list[tuple[int, str, int, dict[str, Any]]] = []
+    if execution_order == "by_benchmark":
+        for benchmark_index, name in enumerate(names, start=1):
+            for mode_index, mode in enumerate(thread_modes, start=1):
+                cases.append((benchmark_index, name, mode_index, mode))
+    else:
+        for mode_index, mode in enumerate(thread_modes, start=1):
+            for benchmark_index, name in enumerate(names, start=1):
+                cases.append((benchmark_index, name, mode_index, mode))
+    return cases
+
+
 def build_thread_env(thread_count: int, output_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     configure_thread_env_dict(env, thread_count)
@@ -622,17 +650,25 @@ class RuntimeMonitor:
         self.thread_count = int(thread_count)
         self.samples: list[dict[str, Any]] = []
         self.error: str | None = None
+        self.backend = "none"
         self._benchmark = "startup"
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started_perf = 0.0
+        self._last_perf = 0.0
+        self._started_process_cpu = 0.0
+        self._last_process_cpu = 0.0
         self._psutil: Any = None
         self._process: Any = None
 
     def start(self) -> None:
         if not self.enabled:
             return
+        self._started_perf = time.perf_counter()
+        self._last_perf = self._started_perf
+        self._started_process_cpu = time.process_time()
+        self._last_process_cpu = self._started_process_cpu
         try:
             import psutil  # type: ignore
 
@@ -641,7 +677,16 @@ class RuntimeMonitor:
             psutil.cpu_percent(interval=None, percpu=self.per_cpu)
             if self.process_cpu:
                 self._process.cpu_percent(interval=None)
-            self._started_perf = time.perf_counter()
+            self.backend = "psutil"
+        except Exception as exc:
+            self._psutil = None
+            self._process = None
+            self.backend = "stdlib"
+            self.error = (
+                f"psutil unavailable ({exc}); system CPU/frequency/memory are unavailable, "
+                "using time.process_time() process-CPU fallback"
+            )
+        try:
             self._thread = threading.Thread(target=self._loop, name="benchmark-monitor", daemon=True)
             self._thread.start()
         except Exception as exc:
@@ -662,12 +707,17 @@ class RuntimeMonitor:
             self._thread.join(timeout=max(1.0, 2.0 * self.interval_s))
         self._sample_once(final=True)
 
+    def sample_now(self) -> None:
+        if self.enabled:
+            self._sample_once(final=False)
+
     def data(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "interval_s": self.interval_s,
             "thread_label": self.thread_label,
             "thread_count": self.thread_count,
+            "backend": self.backend,
             "sample_count": len(self.samples),
             "error": self.error,
             "samples": self.samples,
@@ -678,52 +728,67 @@ class RuntimeMonitor:
             self._sample_once(final=False)
 
     def _sample_once(self, final: bool) -> None:
-        if self._psutil is None:
-            return
         try:
+            now_perf = time.perf_counter()
             with self._lock:
                 benchmark = self._benchmark
             sample: dict[str, Any] = {
-                "t_s": time.perf_counter() - self._started_perf,
+                "t_s": now_perf - self._started_perf,
                 "wall_time": time.time(),
                 "thread_label": self.thread_label,
                 "thread_count": self.thread_count,
                 "benchmark": benchmark,
                 "final": bool(final),
+                "monitor_backend": self.backend,
             }
-            cpu_percent = self._psutil.cpu_percent(interval=None, percpu=self.per_cpu)
-            if self.per_cpu:
-                sample["cpu_percent_per_cpu"] = list(cpu_percent)
-                sample["cpu_percent"] = (
-                    float(sum(cpu_percent)) / len(cpu_percent) if cpu_percent else None
-                )
-            else:
-                sample["cpu_percent"] = float(cpu_percent)
-            try:
-                freq = self._psutil.cpu_freq()
-                if freq is not None:
-                    sample["cpu_freq_mhz"] = {
-                        "current": safe_float(freq.current),
-                        "min": safe_float(freq.min),
-                        "max": safe_float(freq.max),
-                    }
-            except Exception:
-                pass
+            if self._psutil is not None:
+                cpu_percent = self._psutil.cpu_percent(interval=None, percpu=self.per_cpu)
+                if self.per_cpu:
+                    sample["cpu_percent_per_cpu"] = list(cpu_percent)
+                    sample["cpu_percent"] = (
+                        float(sum(cpu_percent)) / len(cpu_percent) if cpu_percent else None
+                    )
+                else:
+                    sample["cpu_percent"] = float(cpu_percent)
+                try:
+                    freq = self._psutil.cpu_freq()
+                    if freq is not None:
+                        sample["cpu_freq_mhz"] = {
+                            "current": safe_float(freq.current),
+                            "min": safe_float(freq.min),
+                            "max": safe_float(freq.max),
+                        }
+                except Exception:
+                    pass
             if self.process_cpu and self._process is not None:
                 process_percent = safe_float(self._process.cpu_percent(interval=None))
                 sample["process_cpu_percent"] = process_percent
                 if process_percent is not None:
                     sample["process_cpu_cores"] = process_percent / 100.0
+            elif self.process_cpu:
+                process_cpu = time.process_time()
+                wall_delta = max(0.0, now_perf - self._last_perf)
+                cpu_delta = max(0.0, process_cpu - self._last_process_cpu)
+                if wall_delta > 0:
+                    process_percent = 100.0 * cpu_delta / wall_delta
+                else:
+                    total_wall = max(1.0e-12, now_perf - self._started_perf)
+                    process_percent = 100.0 * max(0.0, process_cpu - self._started_process_cpu) / total_wall
+                sample["process_cpu_percent"] = process_percent
+                sample["process_cpu_cores"] = process_percent / 100.0
+                self._last_perf = now_perf
+                self._last_process_cpu = process_cpu
             if self.process_memory and self._process is not None:
                 mem = self._process.memory_info()
                 sample["process_rss_bytes"] = int(mem.rss)
                 sample["process_vms_bytes"] = int(mem.vms)
-            try:
-                vm = self._psutil.virtual_memory()
-                sample["memory_percent"] = safe_float(vm.percent)
-                sample["memory_available_bytes"] = int(vm.available)
-            except Exception:
-                pass
+            if self._psutil is not None:
+                try:
+                    vm = self._psutil.virtual_memory()
+                    sample["memory_percent"] = safe_float(vm.percent)
+                    sample["memory_available_bytes"] = int(vm.available)
+                except Exception:
+                    pass
             self.samples.append(sample)
         except Exception as exc:
             self.error = str(exc)
@@ -796,11 +861,7 @@ def run_driver(args: argparse.Namespace) -> int:
     print()
     print("Benchmark flow")
     print("  1. Write effective JSON configuration.")
-    execution_order = str(
-        config.get("benchmark", {}).get("execution_order", "by_benchmark")
-    ).strip().lower()
-    if execution_order not in {"by_benchmark", "by_thread_mode", "thread_mode", "thread_modes"}:
-        execution_order = "by_benchmark"
+    execution_order = normalize_execution_order(config)
     print("  2. Launch worker subprocesses before NumPy/SciPy import.")
     print("  3. Run warmups and repeated timings for each enabled module.")
     print(f"  Execution order: {execution_order}")
@@ -813,7 +874,7 @@ def run_driver(args: argparse.Namespace) -> int:
 
     names = enabled_benchmark_names(config)
     worker_runs = []
-    if execution_order in {"by_thread_mode", "thread_mode", "thread_modes"}:
+    if execution_order == "by_thread_mode":
         for mode in thread_modes:
             label = str(mode["name"])
             threads = int(mode["threads"])
@@ -892,93 +953,91 @@ def run_driver(args: argparse.Namespace) -> int:
             for mode in thread_modes
         ]
         runs_by_label = {str(run["thread_label"]): run for run in worker_runs}
-        total_cases = max(1, len(names) * len(thread_modes))
-        case_index = 0
-        for benchmark_index, name in enumerate(names, start=1):
-            for mode in thread_modes:
-                case_index += 1
-                label = str(mode["name"])
-                threads = int(mode["threads"])
-                run = runs_by_label[label]
-                offset_s = float(run.get("elapsed_s", 0.0) or 0.0)
-                safe_label = safe_filename(label)
-                item_tag = f"{benchmark_index:02d}_{safe_filename(name)}_{safe_label}"
-                worker_input = {
-                    "config": config,
-                    "thread_label": label,
-                    "thread_count": threads,
-                    "benchmark_name": name,
-                }
-                worker_config_path = output_dir / f"{prefix}_worker_{item_tag}_input.json"
-                worker_output_path = output_dir / f"{prefix}_worker_{item_tag}_results.json"
-                worker_log_path = output_dir / f"{prefix}_worker_{item_tag}.log"
-                write_json(worker_config_path, worker_input)
-                env = build_thread_env(threads, output_dir)
-                command = [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--worker-one",
-                    "--worker-config",
-                    str(worker_config_path),
-                    "--worker-output",
-                    str(worker_output_path),
-                ]
-                print(
-                    f"Running {case_index}/{total_cases}: {name} "
-                    f"in thread mode '{label}' with {format_thread_count(threads)} thread(s)"
+        cases = iter_benchmark_cases(names, thread_modes, execution_order)
+        total_cases = max(1, len(cases))
+        for case_index, (benchmark_index, name, _mode_index, mode) in enumerate(cases, start=1):
+            label = str(mode["name"])
+            threads = int(mode["threads"])
+            run = runs_by_label[label]
+            offset_s = float(run.get("elapsed_s", 0.0) or 0.0)
+            safe_label = safe_filename(label)
+            item_tag = f"{case_index:02d}_{benchmark_index:02d}_{safe_filename(name)}_{safe_label}"
+            worker_input = {
+                "config": config,
+                "thread_label": label,
+                "thread_count": threads,
+                "benchmark_name": name,
+            }
+            worker_config_path = output_dir / f"{prefix}_worker_{item_tag}_input.json"
+            worker_output_path = output_dir / f"{prefix}_worker_{item_tag}_results.json"
+            worker_log_path = output_dir / f"{prefix}_worker_{item_tag}.log"
+            write_json(worker_config_path, worker_input)
+            env = build_thread_env(threads, output_dir)
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--worker-one",
+                "--worker-config",
+                str(worker_config_path),
+                "--worker-output",
+                str(worker_output_path),
+            ]
+            print(
+                f"Running {case_index}/{total_cases}: {name} "
+                f"in thread mode '{label}' with {format_thread_count(threads)} thread(s)"
+            )
+            started = time.perf_counter()
+            proc = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=str(Path.cwd()),
+            )
+            elapsed = time.perf_counter() - started
+            run["elapsed_s"] = offset_s + elapsed
+            worker_log_path.write_text(
+                "STDOUT\n"
+                + proc.stdout
+                + "\nSTDERR\n"
+                + proc.stderr
+                + f"\nRETURN_CODE {proc.returncode}\n",
+                encoding="utf-8",
+            )
+            if proc.stdout:
+                print(proc.stdout.rstrip())
+            if proc.returncode != 0 or not worker_output_path.exists():
+                print(f"Worker-one '{label}/{name}' failed; see {worker_log_path}")
+                run["status"] = "error"
+                run["results"].append(
+                    {
+                        "name": name,
+                        "label": BENCHMARK_LABELS.get(name, name),
+                        "status": "error",
+                        "reason": f"worker-one failed, see {worker_log_path}",
+                        "error": proc.stderr,
+                        "sizes": copy.deepcopy(config.get("modules", {}).get(name, {})),
+                    }
                 )
-                started = time.perf_counter()
-                proc = subprocess.run(
-                    command,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                    cwd=str(Path.cwd()),
-                )
-                elapsed = time.perf_counter() - started
-                run["elapsed_s"] = offset_s + elapsed
-                worker_log_path.write_text(
-                    "STDOUT\n"
-                    + proc.stdout
-                    + "\nSTDERR\n"
-                    + proc.stderr
-                    + f"\nRETURN_CODE {proc.returncode}\n",
-                    encoding="utf-8",
-                )
-                if proc.stdout:
-                    print(proc.stdout.rstrip())
-                if proc.returncode != 0 or not worker_output_path.exists():
-                    print(f"Worker-one '{label}/{name}' failed; see {worker_log_path}")
-                    run["status"] = "error"
-                    run["results"].append(
-                        {
-                            "name": name,
-                            "label": BENCHMARK_LABELS.get(name, name),
-                            "status": "error",
-                            "reason": f"worker-one failed, see {worker_log_path}",
-                            "error": proc.stderr,
-                            "sizes": copy.deepcopy(config.get("modules", {}).get(name, {})),
-                        }
-                    )
-                    continue
-                worker_data = read_json(worker_output_path)
-                if not run.get("package_info"):
-                    run["package_info"] = worker_data.get("package_info", {})
-                if not run.get("threadpool_info"):
-                    run["threadpool_info"] = worker_data.get("threadpool_info", [])
-                if not run.get("environment"):
-                    run["environment"] = worker_data.get("environment", {})
-                for sample in worker_data.get("monitoring", {}).get("samples", []):
-                    copied = copy.deepcopy(sample)
-                    try:
-                        copied["t_s"] = offset_s + float(copied.get("t_s", 0.0))
-                    except Exception:
-                        copied["t_s"] = offset_s
-                    run["monitoring"]["samples"].append(copied)
-                run["results"].extend(worker_data.get("results", []))
-                print(f"Finished {name} / {label} in {format_seconds(elapsed)}")
-                print()
+                continue
+            worker_data = read_json(worker_output_path)
+            if not run.get("package_info"):
+                run["package_info"] = worker_data.get("package_info", {})
+            if not run.get("threadpool_info"):
+                run["threadpool_info"] = worker_data.get("threadpool_info", [])
+            if not run.get("environment"):
+                run["environment"] = worker_data.get("environment", {})
+            for sample in worker_data.get("monitoring", {}).get("samples", []):
+                copied = copy.deepcopy(sample)
+                try:
+                    copied["t_s"] = offset_s + float(copied.get("t_s", 0.0))
+                except Exception:
+                    copied["t_s"] = offset_s
+                run["monitoring"]["samples"].append(copied)
+            run["results"].extend(worker_data.get("results", []))
+            print(f"Finished {name} / {label} in {format_seconds(elapsed)}")
+            print()
 
     aggregate = {
         "status": "ok",
@@ -1128,11 +1187,13 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
         if not monitoring:
             lines.append(f"  {run.get('thread_label', 'unknown')}: no monitoring data")
             continue
-        if monitoring.get("error"):
+        if monitoring.get("error") and not samples:
             lines.append(f"  {run.get('thread_label', 'unknown')}: monitor error: {monitoring.get('error')}")
             continue
+        note = f", note={monitoring.get('error')}" if monitoring.get("error") else ""
         lines.append(
             f"  {run.get('thread_label', 'unknown')}: "
+            f"backend={monitoring.get('backend', 'unknown')}, "
             f"samples={summary.get('samples', 0)}, "
             f"cpu_avg={safe_optional(summary.get('cpu_avg_percent'), '.1f')}%, "
             f"cpu_max={safe_optional(summary.get('cpu_max_percent'), '.1f')}%, "
@@ -1140,13 +1201,30 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
             f"observed_cores~{safe_optional((summary.get('process_cpu_max_percent') or 0) / 100.0 if summary.get('process_cpu_max_percent') is not None else None, '.2f')}, "
             f"freq_avg={safe_optional(summary.get('cpu_freq_avg_mhz'), '.0f')} MHz, "
             f"rss_max={human_bytes(summary.get('process_rss_max_bytes'))}"
+            f"{note}"
         )
+    lines.append("")
+
+    lines.append("Timed process CPU cores by benchmark")
+    observed_any = False
+    for row in result_rows(aggregate):
+        if row.get("status") != "ok":
+            continue
+        observed_any = True
+        lines.append(
+            f"  {str(row.get('thread_label', ''))[:8]:8s} {str(row.get('name', ''))[:30]:30s} "
+            f"mean_cores~{safe_optional(row.get('process_cpu_mean_cores'), '.2f')} "
+            f"peak_cores~{safe_optional(row.get('process_cpu_max_cores'), '.2f')}"
+        )
+    if not observed_any:
+        lines.append("  no timed process CPU data")
     lines.append("")
 
     benchmark_cfg = config.get("benchmark", {})
     lines.append("Benchmark controls")
     lines.append(f"  Repeats: {benchmark_cfg.get('repeats')}")
     lines.append(f"  Warmups: {benchmark_cfg.get('warmups')}")
+    lines.append(f"  Execution order: {normalize_execution_order(config)}")
     lines.append(f"  Random seed: {benchmark_cfg.get('random_seed')}")
     lines.append("  RNG: NumPy Generator(PCG64), with deterministic per-test derived seeds")
     target_case_s = float(benchmark_cfg.get("target_case_s", 0.0) or 0.0)
@@ -1224,7 +1302,10 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("  - With cache=True, JIT init includes either compilation or cache lookup/loading, so it is not always zero.")
     lines.append("  - Random inputs use PCG64 and fixed derived seeds, so default runs are deterministic for the same sizes.")
     lines.append("  - Mean/call is one kernel call; Calls is the timed call count selected for that case.")
+    lines.append("  - Timings use time.perf_counter_ns around the timed kernel loop only.")
+    lines.append("  - Timed process CPU core estimates use process CPU time divided by wall time and are capped at os.cpu_count().")
     lines.append("  - With target_case_s > 0, call counts are auto-calibrated per machine/thread mode; compare Mean/call across machines.")
+    lines.append("  - Identical single/multi timings can be normal for single-threaded, memory-bound, or small workloads; check timed process CPU cores by benchmark.")
     return "\n".join(lines) + "\n"
 
 
@@ -1532,9 +1613,15 @@ def plot_monitor_run(ax: Any, run: dict[str, Any], logical_count: int) -> None:
         current = freq_info.get("current") if isinstance(freq_info, dict) else None
         freq.append(float(current) if isinstance(current, (int, float)) else math.nan)
 
-    ax.plot(times, cpu, label="system CPU %", color="#4C78A8", linewidth=1.8)
+    plotted = False
+    if any(math.isfinite(value) for value in cpu):
+        ax.plot(times, cpu, label="system CPU %", color="#4C78A8", linewidth=1.8)
+        plotted = True
     if any(math.isfinite(value) for value in process_cpu):
         ax.plot(times, process_cpu, label="process CPU % / logical cores", color="#F58518", linewidth=1.6)
+        plotted = True
+    if not plotted:
+        ax.text(0.5, 0.5, "No CPU utilization samples", ha="center", va="center", transform=ax.transAxes)
     ax.set_xlabel("Time in worker (s)", fontsize=12)
     ax.set_ylabel("CPU utilization (%)", fontsize=12)
     ax.set_ylim(bottom=0)
@@ -1550,8 +1637,9 @@ def plot_monitor_run(ax: Any, run: dict[str, Any], logical_count: int) -> None:
         ax2.set_ylabel("CPU frequency (MHz)", fontsize=12)
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=10)
-    else:
+        if lines1 or lines2:
+            ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=10)
+    elif plotted:
         ax.legend(loc="upper right", fontsize=10)
 
     previous = None
@@ -1781,8 +1869,8 @@ def run_worker(args: argparse.Namespace) -> int:
                     )
                 else:
                     print(f"[{thread_label}]   {result.get('status')}: {result.get('reason')}")
+                monitor.sample_now()
         finally:
-            monitor.set_benchmark("finished")
             monitor.stop()
         elapsed = time.perf_counter() - started
         try:
@@ -1909,7 +1997,7 @@ def run_worker_one(args: argparse.Namespace) -> int:
             else:
                 print(f"[{thread_label}]   {result.get('status')}: {result.get('reason')}")
         finally:
-            monitor.set_benchmark("finished")
+            monitor.sample_now()
             monitor.stop()
         elapsed = time.perf_counter() - started
         try:
@@ -2146,9 +2234,9 @@ def timed_result(
     elif target_case_s > 0 or target_repeat_s > 0:
         if bool(global_cfg.get("gc_between_repeats", True)):
             gc.collect()
-        calibration_started = time.perf_counter()
+        calibration_started = time.perf_counter_ns()
         func()
-        calibration_elapsed = time.perf_counter() - calibration_started
+        calibration_elapsed = (time.perf_counter_ns() - calibration_started) * 1.0e-9
         target_batch_s = target_case_s / repeats if target_case_s > 0 else target_repeat_s
         if calibration_elapsed > 0:
             inner_loops = max(1, int(math.ceil(target_batch_s / calibration_elapsed)))
@@ -2158,16 +2246,26 @@ def timed_result(
     else:
         inner_loops = 1
     batch_times = []
+    batch_process_cpu_times = []
     checksum = None
     for _ in range(repeats):
         if bool(global_cfg.get("gc_between_repeats", True)):
             gc.collect()
-        started = time.perf_counter()
+        process_started = time.process_time_ns()
+        started = time.perf_counter_ns()
         for _inner in range(inner_loops):
             checksum = func()
-        elapsed = time.perf_counter() - started
+        elapsed = (time.perf_counter_ns() - started) * 1.0e-9
+        process_elapsed = (time.process_time_ns() - process_started) * 1.0e-9
         batch_times.append(float(elapsed))
+        batch_process_cpu_times.append(float(process_elapsed))
     per_call_times = [value / inner_loops for value in batch_times]
+    logical_cpu_count = max(1, int(os.cpu_count() or 1))
+    process_cpu_cores = [
+        min(logical_cpu_count, cpu_time / wall_time)
+        for cpu_time, wall_time in zip(batch_process_cpu_times, batch_times)
+        if wall_time > 0
+    ]
     mean = sum(per_call_times) / len(per_call_times)
     batch_mean = sum(batch_times) / len(batch_times)
     if len(per_call_times) > 1:
@@ -2193,8 +2291,15 @@ def timed_result(
         "total_calls": inner_loops * repeats,
         "target_case_s": target_case_s,
         "target_repeat_s": target_repeat_s,
+        "timer": "time.perf_counter_ns",
+        "timed_region": "kernel loop only; warmups, calibration, subprocess startup, and JIT initialization are excluded",
         "times_s": per_call_times,
         "batch_times_s": batch_times,
+        "batch_process_cpu_s": batch_process_cpu_times,
+        "process_cpu_mean_cores": (
+            sum(process_cpu_cores) / len(process_cpu_cores) if process_cpu_cores else None
+        ),
+        "process_cpu_max_cores": max(process_cpu_cores) if process_cpu_cores else None,
         "mean_s": mean,
         "std_s": std,
         "min_s": min(per_call_times),

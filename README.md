@@ -107,10 +107,11 @@ Important keys:
   or clear BLAS/LAPACK/OpenMP thread environment variables and records the
   actual threadpool and CPU usage chosen by the numerical libraries. `single`
   mode still strictly forces one numerical thread.
-- `benchmark.execution_order`: `by_benchmark` runs single/multithread cases
-  next to each other for each workload. This is the default because it reduces
-  thermal/order bias when comparing speedups. Use `by_thread_mode` to run the
+- `benchmark.execution_order`: the default is `by_thread_mode`, which runs the
   complete single-thread suite first and the complete multithread suite second.
+  This avoids repeatedly switching numerical thread policy while still updating
+  the UI after each completed case. `by_benchmark` remains available if you want
+  single/multithread cases next to each other for each workload.
 - `monitoring.enabled`: record runtime CPU, frequency, and memory samples.
 - `monitoring.interval_s`: sampling interval for runtime monitoring.
 - `modules.<name>.enabled`: enable or disable a benchmark.
@@ -124,6 +125,11 @@ the GEMM-heavy and dense-solve workloads, because very small single calls can
 hide real multithreaded speedups behind thread scheduling overhead. The smoke
 config remains small and is only for checking functionality, not for comparing
 single-thread and multithread performance.
+
+Runtime system CPU, CPU frequency, and memory monitoring require `psutil`.
+If `psutil` is missing, including on a fresh Windows environment, the benchmark
+still records a standard-library process CPU fallback from `time.process_time()`,
+but system CPU %, frequency, and RSS memory fields will be unavailable.
 
 Default dense eig/SVD sizes are not the smoke sizes: NumPy/SciPy Hermitian
 eigenvalues use complex `n=1536`, NumPy/SciPy non-Hermitian eigenvalues use
