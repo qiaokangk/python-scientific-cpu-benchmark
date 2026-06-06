@@ -2,7 +2,7 @@
 
 This folder contains a cross-platform benchmark driver for common Python
 scientific CPU workloads. It compares a single-thread mode with a multithread
-mode using all configured CPU threads.
+mode that leaves numerical libraries on their default automatic thread policy.
 
 ## Run
 
@@ -47,12 +47,14 @@ The driver writes:
 
 ## Thread control
 
-The driver starts one child process for each configured thread mode. Before the
-child imports NumPy/SciPy, it sets:
+The driver starts child processes before importing NumPy/SciPy so thread policy
+is applied before BLAS/LAPACK/OpenMP libraries initialize. In `single` mode it
+strictly sets:
 
 ```text
 OMP_NUM_THREADS
 OPENBLAS_NUM_THREADS
+GOTO_NUM_THREADS
 MKL_NUM_THREADS
 VECLIB_MAXIMUM_THREADS
 NUMEXPR_NUM_THREADS
@@ -60,16 +62,24 @@ BLIS_NUM_THREADS
 NUMBA_NUM_THREADS
 ```
 
-This is more reliable than trying to change BLAS/OpenMP thread counts after
-NumPy has already been imported. If `threadpoolctl` is installed, the worker
-also applies the same limit through that library.
+to `1`, and also applies a one-thread `threadpoolctl` limit when available.
 
-The benchmark avoids per-call manual thread arguments by default. Multi-thread
-mode sets the process/threadpool limits before imports and lets NumPy/SciPy
-libraries use their normal BLAS/OpenMP/vectorized implementations. Numba
-`prange` is the main explicit parallel-loop exception. The report includes a
-thread-validation section with threadpoolctl thread limits and observed peak
-process CPU cores from runtime monitoring.
+In default `multi` mode, `benchmark.multi_thread_count` is `auto`. The worker
+removes those thread environment variables and does not apply a threadpoolctl
+upper limit, so NumPy/SciPy/BLAS/LAPACK/OpenMP libraries use their normal
+automatic thread policy. The report records the library-reported threadpool
+state and observed peak process CPU cores from runtime monitoring.
+
+You can still set `benchmark.multi_thread_count` to `logical`, `physical`, or
+an integer if you explicitly want a fixed upper limit, but this is not the
+standard default because some LAPACK workloads can become much slower when
+forced to too many threads.
+
+The default `auto_thread_regression_guard` keeps this transparent in plots: if
+the auto multithread result is more than `auto_thread_regression_factor` slower
+than the matching single-thread result, that row is marked as skipped for timing
+and speedup plots while the raw measured values remain in JSON under
+`measured_auto_result`.
 
 Numba kernels are compiled from module-level functions with `cache=True`.
 The first run creates cache files under `__pycache__`; later runs with the same
@@ -96,11 +106,19 @@ Important keys:
   when using `target_case_s`.
 - `benchmark.max_memory_gb`: skip cases whose estimated working set exceeds this.
 - `benchmark.thread_modes`: usually `["single", "multi"]`.
-- `benchmark.multi_thread_count`: `logical`, `physical`, or an integer.
+- `benchmark.multi_thread_count`: `auto`, `logical`, `physical`, or an
+  integer. The standard default is `auto`: the multithread worker leaves
+  BLAS/LAPACK/OpenMP thread environment variables unset and records the actual
+  threadpool and CPU usage chosen by the numerical libraries. `single` mode
+  still strictly forces one numerical thread.
 - `benchmark.execution_order`: `by_benchmark` runs single/multithread cases
   next to each other for each workload. This is the default because it reduces
   thermal/order bias when comparing speedups. Use `by_thread_mode` to run the
   complete single-thread suite first and the complete multithread suite second.
+- `benchmark.auto_thread_regression_guard`: when true, auto-multithread rows
+  that are slower than single by more than the configured factor are marked as
+  skipped for plots, with raw measured data preserved in JSON.
+- `benchmark.auto_thread_regression_factor`: default `1.05`.
 - `monitoring.enabled`: record runtime CPU, frequency, and memory samples.
 - `monitoring.interval_s`: sampling interval for runtime monitoring.
 - `modules.<name>.enabled`: enable or disable a benchmark.

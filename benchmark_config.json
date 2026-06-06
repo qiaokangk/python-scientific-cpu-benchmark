@@ -5,11 +5,13 @@
     "execution_order": "by_benchmark",
     "gc_between_repeats": true,
     "max_memory_gb": 4.0,
-    "multi_thread_count": "logical",
+    "multi_thread_count": "auto",
     "random_seed": 20260606,
     "repeats": 5,
     "target_case_s": 10.0,
     "target_repeat_s": 0.0,
+    "auto_thread_regression_guard": true,
+    "auto_thread_regression_factor": 1.05,
     "thread_modes": [
       "single",
       "multi"

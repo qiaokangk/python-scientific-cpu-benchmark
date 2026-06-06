@@ -365,7 +365,7 @@ class BenchmarkWorker(QThread):
                 label = str(mode["name"])
                 threads = int(mode["threads"])
                 run = runs_by_label[label]
-                title = f"{index}/{len(names)} {name} / {label} ({threads} thread(s))"
+                title = f"{index}/{len(names)} {name} / {label} ({bench.format_thread_count(threads)} thread(s))"
                 self.progress.emit(done, total, title)
                 offset_s = float(run.get("elapsed_s", 0.0) or 0.0)
                 worker_input = {
@@ -451,6 +451,7 @@ class BenchmarkWorker(QThread):
                             copied["t_s"] = offset_s
                         run["monitoring"]["samples"].append(copied)
                     run["results"].extend(worker_data.get("results", []))
+                bench.apply_auto_thread_regression_guard(aggregate)
                 done += 1
                 message = self._last_result_message(label, threads, name, run["results"])
                 self.aggregate_ready.emit(copy.deepcopy(aggregate), message, done, total)
@@ -462,6 +463,7 @@ class BenchmarkWorker(QThread):
             aggregate["status"] = "ok"
             message = "Benchmark completed."
 
+        bench.apply_auto_thread_regression_guard(aggregate)
         bench.write_benchmark_outputs(aggregate, output_dir, prefix, output_cfg)
         return aggregate, message
 
@@ -469,16 +471,17 @@ class BenchmarkWorker(QThread):
     def _last_result_message(
         label: str, threads: int, name: str, results: list[dict[str, Any]]
     ) -> str:
+        thread_text = bench.format_thread_count(threads)
         match = next((row for row in reversed(results) if row.get("name") == name), None)
         if not match:
-            return f"{label} ({threads} threads) {name}: no result"
+            return f"{label} ({thread_text} threads) {name}: no result"
         if match.get("status") != "ok":
-            return f"{label} ({threads} threads) {name}: {match.get('status')} {match.get('reason', '')}"
+            return f"{label} ({thread_text} threads) {name}: {match.get('status')} {match.get('reason', '')}"
         metric = ""
         if match.get("metric_name") and match.get("metric_value") is not None:
             metric = f", {match['metric_value']:.3g} {match['metric_name']}"
         return (
-            f"{label} ({threads} threads) {name}: "
+            f"{label} ({thread_text} threads) {name}: "
             f"mean {bench.format_seconds(match.get('mean_s'))}, "
             f"timed {bench.format_seconds(match.get('timed_total_s'))}, "
             f"calls {int(match.get('total_calls', match.get('inner_loops', 1)) or 1)}{metric}"
@@ -579,7 +582,7 @@ class BenchmarkWindow(QMainWindow):
         thread_row.addWidget(self.multi_check)
         thread_row.addStretch(1)
         self.multi_count_edit = QLineEdit()
-        self.multi_count_edit.setPlaceholderText("logical, physical, or integer")
+        self.multi_count_edit.setPlaceholderText("auto, logical, physical, or integer")
         form.addRow("Repeats", self.repeats_spin)
         form.addRow("Warmups", self.warmups_spin)
         form.addRow("Random seed", self.seed_spin)
@@ -790,7 +793,7 @@ class BenchmarkWindow(QMainWindow):
             modes = [str(item.get("name", "")) if isinstance(item, dict) else str(item) for item in benchmark_cfg.get("thread_modes", ["single", "multi"])]
             self.single_check.setChecked(any(mode.lower() == "single" for mode in modes))
             self.multi_check.setChecked(any(mode.lower() == "multi" for mode in modes))
-            self.multi_count_edit.setText(str(benchmark_cfg.get("multi_thread_count", "logical")))
+            self.multi_count_edit.setText(str(benchmark_cfg.get("multi_thread_count", "auto")))
             self.enforce_threadpool_check.setChecked(bool(benchmark_cfg.get("enforce_threadpoolctl", True)))
             self.gc_check.setChecked(bool(benchmark_cfg.get("gc_between_repeats", True)))
             self.monitor_check.setChecked(bool(monitor_cfg.get("enabled", True)))
@@ -929,7 +932,7 @@ class BenchmarkWindow(QMainWindow):
                 "target_repeat_s": 0.0,
                 "calibration_max_inner_loops": int(cfg.get("benchmark", {}).get("calibration_max_inner_loops", 100_000)),
                 "thread_modes": modes,
-                "multi_thread_count": self.multi_count_edit.text().strip() or "logical",
+                "multi_thread_count": self.multi_count_edit.text().strip() or "auto",
                 "enforce_threadpoolctl": self.enforce_threadpool_check.isChecked(),
                 "gc_between_repeats": self.gc_check.isChecked(),
             }
@@ -1095,12 +1098,12 @@ class BenchmarkWindow(QMainWindow):
         )
 
     def draw_timing_plot(self, aggregate: dict[str, Any]) -> None:
-        rows = [row for row in bench.result_rows(aggregate) if row.get("status") == "ok"]
+        rows = bench.result_rows(aggregate)
         fig = self.timing_pane.figure
         fig.clear()
         names = self.planned_benchmark_names(aggregate)
         modes = self.planned_thread_labels(aggregate)
-        if not names or not modes:
+        if not names or not modes or not any(row.get("status") == "ok" for row in rows):
             self.timing_pane.draw_empty("No successful timing rows yet.")
             return
         ax = fig.add_subplot(111)

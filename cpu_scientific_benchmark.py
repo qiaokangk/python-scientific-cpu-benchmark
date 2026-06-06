@@ -2,8 +2,10 @@
 """Cross-platform CPU benchmark for Python scientific numerical workloads.
 
 The driver process does not import NumPy before launching worker processes.
-Each worker sets thread-control environment variables first, then imports
-NumPy/SciPy so BLAS/LAPACK/OpenMP thread settings are applied consistently.
+Each worker applies thread-control policy first, then imports NumPy/SciPy so
+BLAS/LAPACK/OpenMP thread settings are applied consistently. Single mode is
+strictly one thread; the default multithread mode leaves library thread counts
+on auto.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from typing import Any
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
+    "GOTO_NUM_THREADS",
     "MKL_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
     "NUMEXPR_NUM_THREADS",
@@ -145,13 +148,15 @@ def default_config() -> dict[str, Any]:
             "random_seed": 20260606,
             "max_memory_gb": 4.0,
             "thread_modes": ["single", "multi"],
-            "multi_thread_count": "logical",
+            "multi_thread_count": "auto",
             "execution_order": "by_benchmark",
             "enforce_threadpoolctl": True,
             "gc_between_repeats": True,
             "target_case_s": 10.0,
             "target_repeat_s": 0.0,
             "calibration_max_inner_loops": 100_000,
+            "auto_thread_regression_guard": True,
+            "auto_thread_regression_factor": 1.05,
         },
         "monitoring": {
             "enabled": True,
@@ -444,11 +449,13 @@ def collect_system_info() -> dict[str, Any]:
 
 def resolve_thread_count(value: Any, system_info: dict[str, Any]) -> int:
     if isinstance(value, int):
-        return max(1, int(value))
+        return 0 if int(value) <= 0 else int(value)
     text = str(value).strip().lower()
     logical = int(system_info.get("logical_cpu_count") or os.cpu_count() or 1)
     physical_value = system_info.get("physical_cpu_count")
     physical = int(physical_value) if physical_value else logical
+    if text in {"auto", "default", "library", "unset", "none"}:
+        return 0
     if text in {"single", "one", "1"}:
         return 1
     if text in {"logical", "all", "all_logical", "max"}:
@@ -456,7 +463,8 @@ def resolve_thread_count(value: Any, system_info: dict[str, Any]) -> int:
     if text in {"physical", "all_physical"}:
         return max(1, physical)
     try:
-        return max(1, int(text))
+        parsed = int(text)
+        return 0 if parsed <= 0 else parsed
     except ValueError:
         return max(1, logical)
 
@@ -475,7 +483,7 @@ def resolve_thread_modes(config: dict[str, Any], system_info: dict[str, Any]) ->
                 threads = 1
             elif name.lower() == "multi":
                 threads = resolve_thread_count(
-                    benchmark_cfg.get("multi_thread_count", "logical"), system_info
+                    benchmark_cfg.get("multi_thread_count", "auto"), system_info
                 )
             else:
                 threads = resolve_thread_count(name, system_info)
@@ -493,12 +501,42 @@ def resolve_thread_modes(config: dict[str, Any], system_info: dict[str, Any]) ->
 
 def build_thread_env(thread_count: int, output_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
+    configure_thread_env_dict(env, thread_count)
+    env["MPLCONFIGDIR"] = str(output_dir / ".matplotlib")
+    return env
+
+
+def is_auto_thread_count(thread_count: Any) -> bool:
+    try:
+        return int(thread_count) <= 0
+    except Exception:
+        return str(thread_count).strip().lower() in {"auto", "default", "library", "unset", "none"}
+
+
+def format_thread_count(thread_count: Any) -> str:
+    if is_auto_thread_count(thread_count):
+        return "auto"
+    try:
+        return str(max(1, int(thread_count)))
+    except Exception:
+        return str(thread_count)
+
+
+def configure_thread_env_dict(env: dict[str, str], thread_count: int) -> None:
+    if is_auto_thread_count(thread_count):
+        for var in THREAD_ENV_VARS:
+            env.pop(var, None)
+        env.pop("OMP_DYNAMIC", None)
+        env.pop("MKL_DYNAMIC", None)
+        return
     for var in THREAD_ENV_VARS:
         env[var] = str(int(thread_count))
     env["OMP_DYNAMIC"] = "FALSE"
     env["MKL_DYNAMIC"] = "FALSE"
-    env["MPLCONFIGDIR"] = str(output_dir / ".matplotlib")
-    return env
+
+
+def configure_process_thread_env(thread_count: int) -> None:
+    configure_thread_env_dict(os.environ, thread_count)
 
 
 def enabled_benchmark_names(config: dict[str, Any]) -> list[str]:
@@ -747,7 +785,7 @@ def run_driver(args: argparse.Namespace) -> int:
                 "--worker-output",
                 str(worker_output_path),
             ]
-            print(f"Running thread mode '{label}' with {threads} thread(s)")
+            print(f"Running thread mode '{label}' with {format_thread_count(threads)} thread(s)")
             started = time.perf_counter()
             proc = subprocess.run(
                 command,
@@ -835,7 +873,7 @@ def run_driver(args: argparse.Namespace) -> int:
                 ]
                 print(
                     f"Running {case_index}/{total_cases}: {name} "
-                    f"in thread mode '{label}' with {threads} thread(s)"
+                    f"in thread mode '{label}' with {format_thread_count(threads)} thread(s)"
                 )
                 started = time.perf_counter()
                 proc = subprocess.run(
@@ -931,6 +969,7 @@ def write_benchmark_outputs(
     prefix: str,
     output_cfg: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
+    apply_auto_thread_regression_guard(aggregate)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = cli_output_paths(output_dir, prefix)
     write_json(paths["effective_config"], aggregate.get("config", {}))
@@ -1008,7 +1047,7 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("Thread validation")
     for run in runs:
         label = run.get("thread_label", "unknown")
-        expected = run.get("thread_count", "unknown")
+        expected = format_thread_count(run.get("thread_count", "unknown"))
         threadpools = run.get("threadpool_info", [])
         pool_parts = []
         for lib in threadpools:
@@ -1077,6 +1116,12 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
             "  Target timed case: disabled; one call per timed repeat unless inner_loops is set"
         )
     lines.append(f"  Max estimated memory per case: {benchmark_cfg.get('max_memory_gb')} GiB")
+    if bool(benchmark_cfg.get("auto_thread_regression_guard", True)):
+        factor = float(benchmark_cfg.get("auto_thread_regression_factor", 1.05) or 1.05)
+        lines.append(
+            f"  Auto thread regression guard: enabled "
+            f"(skip auto multi rows slower than {factor:.2f}x single)"
+        )
     lines.append(f"  Thread env vars: {', '.join(THREAD_ENV_VARS)}")
     lines.append("")
 
@@ -1098,9 +1143,10 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
         lines.append("-" * len(header))
         for row in rows:
             if row["status"] != "ok":
+                thread_text = format_thread_count(row.get("thread_count", "unknown"))
                 lines.append(
                     f"{row['name'][:30]:30s} {row['thread_label'][:8]:8s} "
-                    f"{row['thread_count']:4d} {'skipped/error':>11s} "
+                    f"{thread_text:>4s} {'skipped/error':>11s} "
                     f"{'':>10s} {'':>7s} {'':>10s} {'':>22s} {'':>8s}"
                 )
                 lines.append(f"  reason: {row.get('reason') or row.get('error', '')}")
@@ -1113,9 +1159,10 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
                 compile_text = format_seconds(row.get("compile_s"))
             speedup = row.get("speedup")
             speedup_text = f"{speedup:.2f}x" if speedup is not None else ""
+            thread_text = format_thread_count(row.get("thread_count", "unknown"))
             lines.append(
                 f"{row['name'][:30]:30s} {row['thread_label'][:8]:8s} "
-                f"{row['thread_count']:4d} {format_seconds(row.get('mean_s')):>11s} "
+                f"{thread_text:>4s} {format_seconds(row.get('mean_s')):>11s} "
                 f"{format_seconds(row.get('batch_mean_s', row.get('mean_s'))):>10s} "
                 f"{int(row.get('total_calls', row.get('inner_loops', 1)) or 1):7d} {compile_text:>10s} "
                 f"{metric[:22]:>22s} {speedup_text:>8s}"
@@ -1123,7 +1170,9 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Notes")
     lines.append("  - Speedup is computed against the first successful single-thread result with the same benchmark name.")
-    lines.append("  - Multi mode sets thread environment variables before importing NumPy/SciPy; per-call worker arguments are avoided except when explicitly enabled in config.")
+    lines.append("  - Single mode strictly sets numerical thread environment variables to 1 before importing NumPy/SciPy.")
+    lines.append("  - Multi mode defaults to auto: thread environment variables are left unset and libraries choose their own thread counts.")
+    lines.append("  - Auto multi rows that are slower than single beyond the guard threshold are skipped from plots; measured values remain in JSON.")
     lines.append("  - Python scalar loops do not use BLAS/OpenMP threads and are included as interpreter overhead baselines.")
     lines.append("  - The Numba prange benchmark uses only scalar arithmetic inside prange; nested NumPy/SciPy/BLAS-style calls are rejected.")
     lines.append("  - Numba JIT init time is reported separately and is not included in the timed runtime mean.")
@@ -1132,6 +1181,99 @@ def format_plain_report(aggregate: dict[str, Any]) -> str:
     lines.append("  - Mean/call is one kernel call; Calls is the timed call count selected for that case.")
     lines.append("  - With target_case_s > 0, call counts are auto-calibrated per machine/thread mode; compare Mean/call across machines.")
     return "\n".join(lines) + "\n"
+
+
+AUTO_REGRESSION_RAW_KEYS = (
+    "times_s",
+    "batch_times_s",
+    "mean_s",
+    "std_s",
+    "min_s",
+    "batch_mean_s",
+    "batch_std_s",
+    "batch_min_s",
+    "timed_total_s",
+    "metric_name",
+    "metric_value",
+    "checksum",
+    "repeats",
+    "warmups",
+    "inner_loops",
+    "total_calls",
+    "target_case_s",
+    "target_repeat_s",
+)
+
+
+def apply_auto_thread_regression_guard(aggregate: dict[str, Any]) -> None:
+    """Mark auto-thread rows that regress badly versus single as skipped.
+
+    The measured numbers remain in JSON under ``measured_auto_result`` so the
+    data is auditable, but plotting/report speedup logic treats these rows as
+    skipped. This avoids presenting an OpenBLAS/MKL/Accelerate auto-threading
+    regression as a meaningful multithread benchmark result.
+    """
+
+    benchmark_cfg = aggregate.get("config", {}).get("benchmark", {})
+    if not bool(benchmark_cfg.get("auto_thread_regression_guard", True)):
+        return
+    try:
+        factor = float(benchmark_cfg.get("auto_thread_regression_factor", 1.05) or 1.05)
+    except Exception:
+        factor = 1.05
+    factor = max(1.0, factor)
+
+    single_by_name: dict[str, dict[str, Any]] = {}
+    for run in aggregate.get("runs", []):
+        label = str(run.get("thread_label", "")).lower()
+        thread_count = run.get("thread_count", 0)
+        if label != "single" and not (
+            not is_auto_thread_count(thread_count) and int(thread_count or 0) == 1
+        ):
+            continue
+        for result in run.get("results", []):
+            if result.get("status") != "ok" or result.get("mean_s") is None:
+                continue
+            single_by_name.setdefault(str(result.get("name", "")), result)
+
+    for run in aggregate.get("runs", []):
+        label = str(run.get("thread_label", "")).lower()
+        if label != "multi" or not is_auto_thread_count(run.get("thread_count", 0)):
+            continue
+        for result in run.get("results", []):
+            if result.get("auto_thread_regression"):
+                continue
+            if result.get("status") != "ok" or result.get("mean_s") is None:
+                continue
+            baseline = single_by_name.get(str(result.get("name", "")))
+            if baseline is None or baseline.get("mean_s") is None:
+                continue
+            try:
+                mean_s = float(result["mean_s"])
+                single_s = float(baseline["mean_s"])
+            except Exception:
+                continue
+            if mean_s <= 0.0 or single_s <= 0.0:
+                continue
+            ratio = mean_s / single_s
+            if ratio <= factor:
+                continue
+
+            result["measured_auto_result"] = {
+                key: copy.deepcopy(result.get(key))
+                for key in AUTO_REGRESSION_RAW_KEYS
+                if key in result
+            }
+            result["auto_thread_regression"] = True
+            result["auto_thread_regression_factor"] = ratio
+            result["auto_thread_regression_single_mean_s"] = single_s
+            result["status"] = "skipped"
+            result["reason"] = (
+                f"auto multithread was {ratio:.2f}x slower than single "
+                f"({format_seconds(mean_s)} vs {format_seconds(single_s)}); "
+                "excluded from timing and speedup plots. Raw measured values are in "
+                "measured_auto_result."
+            )
 
 
 def result_rows(aggregate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1225,13 +1367,17 @@ def plot_timing_bars(
     all_means = [
         float(row["mean_s"])
         for row in rows
-        if row.get("mean_s") is not None and float(row["mean_s"]) > 0
+        if row.get("status") == "ok"
+        and row.get("mean_s") is not None
+        and float(row["mean_s"]) > 0
     ]
+    x_max = max([1.0e-12] + all_means)
     shade_plot_rows(ax, len(plot_names))
 
     for idx, mode in enumerate(plot_modes):
         means = []
         labels = []
+        skipped = []
         for name in plot_names:
             match = next(
                 (
@@ -1241,9 +1387,16 @@ def plot_timing_bars(
                 ),
                 None,
             )
-            value = float(match["mean_s"]) if match and match.get("mean_s") is not None else math.nan
+            value = (
+                float(match["mean_s"])
+                if match
+                and match.get("status") == "ok"
+                and match.get("mean_s") is not None
+                else math.nan
+            )
             means.append(value)
             labels.append(format_seconds(value) if math.isfinite(value) else "")
+            skipped.append(bool(match and match.get("auto_thread_regression")))
         offsets = [y - 0.39 + height / 2.0 + idx * height for y in y_positions]
         bars = ax.barh(
             offsets,
@@ -1267,13 +1420,24 @@ def plot_timing_bars(
                     clip_on=False,
                     zorder=3,
                 )
+        for offset, is_skipped in zip(offsets, skipped):
+            if is_skipped:
+                ax.text(
+                    x_max * 0.015,
+                    offset,
+                    "skipped",
+                    va="center",
+                    ha="left",
+                    fontsize=8,
+                    color="#777777",
+                    zorder=3,
+                )
 
     ax.set_xlabel("Mean time per call (s, linear scale; shorter is faster)", fontsize=12)
     ax.set_title("Mean runtime by thread mode", fontsize=15)
     ax.set_yticks(y_positions)
     ax.set_yticklabels([compact_benchmark_label(name, width=label_width) for name in plot_names], fontsize=9)
     ax.set_ylim(len(plot_names) - 0.5, -0.5)
-    x_max = max([1.0e-12] + all_means)
     ax.set_xlim(0.0, x_max * 1.45)
     ax.grid(True, axis="x", alpha=0.25, zorder=1)
     ax.legend(loc="lower right", fontsize=10)
@@ -1415,8 +1579,9 @@ def plot_monitor_run(ax: Any, run: dict[str, Any], logical_count: int) -> None:
     ax.set_xlabel("Time in worker (s)", fontsize=12)
     ax.set_ylabel("CPU utilization (%)", fontsize=12)
     ax.set_ylim(bottom=0)
+    thread_text = format_thread_count(run.get("thread_count"))
     ax.set_title(
-        f"Runtime monitoring: {run.get('thread_label')} ({run.get('thread_count')} threads)",
+        f"Runtime monitoring: {run.get('thread_label')} ({thread_text} threads)",
         fontsize=15,
     )
     ax.grid(True, alpha=0.25)
@@ -1464,8 +1629,9 @@ def make_pdf_report(aggregate: dict[str, Any], pdf_path: Path) -> str | None:
         }
     )
 
-    rows = [row for row in result_rows(aggregate) if row.get("status") == "ok"]
-    if not rows:
+    rows = result_rows(aggregate)
+    ok_rows = [row for row in rows if row.get("status") == "ok"]
+    if not ok_rows:
         return "no successful benchmark rows"
     names = [name for name in BENCHMARK_ORDER if any(row["name"] == name for row in rows)]
 
@@ -1497,19 +1663,19 @@ def make_pdf_report(aggregate: dict[str, Any], pdf_path: Path) -> str | None:
 
         speedup_rows = [
             row
-            for row in rows
+            for row in ok_rows
             if row.get("speedup") is not None and int(row.get("thread_count", 0)) != 1
         ]
         if speedup_rows:
             fig, ax = plt.subplots(figsize=(11, 7))
-            plot_speedup_bars(ax, rows, names=names, label_width=30)
+            plot_speedup_bars(ax, ok_rows, names=names, label_width=30)
             adjust_horizontal_bar_figure(fig)
             pdf.savefig(fig)
             plt.close(fig)
 
         metric_rows = [
             row
-            for row in rows
+            for row in ok_rows
             if row.get("metric_name")
             and row.get("metric_value") is not None
             and str(row.get("thread_label", "")).lower() != "single"
@@ -1557,10 +1723,7 @@ def run_worker(args: argparse.Namespace) -> int:
     config = worker_input["config"]
     thread_label = str(worker_input["thread_label"])
     thread_count = int(worker_input["thread_count"])
-    for var in THREAD_ENV_VARS:
-        os.environ[var] = str(thread_count)
-    os.environ["OMP_DYNAMIC"] = "FALSE"
-    os.environ["MKL_DYNAMIC"] = "FALSE"
+    configure_process_thread_env(thread_count)
 
     import numpy as np
 
@@ -1588,10 +1751,11 @@ def run_worker(args: argparse.Namespace) -> int:
     try:
         import numba as numba_module  # type: ignore
 
-        try:
-            numba_module.set_num_threads(thread_count)
-        except Exception:
-            pass
+        if not is_auto_thread_count(thread_count):
+            try:
+                numba_module.set_num_threads(thread_count)
+            except Exception:
+                pass
         globals()["_numba_prange"] = numba_module.prange
     except Exception:
         numba_module = None
@@ -1603,7 +1767,8 @@ def run_worker(args: argparse.Namespace) -> int:
             from threadpoolctl import threadpool_info, threadpool_limits  # type: ignore
 
             threadpool_info_func = threadpool_info
-            threadpool_limits_cm = threadpool_limits(limits=thread_count)
+            if not is_auto_thread_count(thread_count):
+                threadpool_limits_cm = threadpool_limits(limits=thread_count)
         except Exception:
             threadpool_limits_cm = contextlib.nullcontext()
     else:
@@ -1686,10 +1851,7 @@ def run_worker_one(args: argparse.Namespace) -> int:
     thread_label = str(worker_input["thread_label"])
     thread_count = int(worker_input["thread_count"])
     benchmark_name = str(worker_input["benchmark_name"])
-    for var in THREAD_ENV_VARS:
-        os.environ[var] = str(thread_count)
-    os.environ["OMP_DYNAMIC"] = "FALSE"
-    os.environ["MKL_DYNAMIC"] = "FALSE"
+    configure_process_thread_env(thread_count)
 
     import numpy as np
 
@@ -1717,10 +1879,11 @@ def run_worker_one(args: argparse.Namespace) -> int:
     try:
         import numba as numba_module  # type: ignore
 
-        try:
-            numba_module.set_num_threads(thread_count)
-        except Exception:
-            pass
+        if not is_auto_thread_count(thread_count):
+            try:
+                numba_module.set_num_threads(thread_count)
+            except Exception:
+                pass
         globals()["_numba_prange"] = numba_module.prange
     except Exception:
         numba_module = None
@@ -1732,7 +1895,8 @@ def run_worker_one(args: argparse.Namespace) -> int:
             from threadpoolctl import threadpool_info, threadpool_limits  # type: ignore
 
             threadpool_info_func = threadpool_info
-            threadpool_limits_cm = threadpool_limits(limits=thread_count)
+            if not is_auto_thread_count(thread_count):
+                threadpool_limits_cm = threadpool_limits(limits=thread_count)
         except Exception:
             threadpool_limits_cm = contextlib.nullcontext()
     else:
@@ -2353,7 +2517,11 @@ def bench_fft_3d_complex128(
     x = random_complex128(np, rng, shape)
     backend = str(module_cfg.get("backend", "scipy_if_available"))
     use_scipy = scipy_fft is not None and backend in {"scipy", "scipy_if_available"}
-    workers = thread_count if bool(module_cfg.get("use_scipy_workers", False)) else None
+    workers = (
+        thread_count
+        if bool(module_cfg.get("use_scipy_workers", False)) and not is_auto_thread_count(thread_count)
+        else None
+    )
 
     def func() -> float:
         if use_scipy:
@@ -2580,10 +2748,11 @@ def bench_numba_prange_loop(
     if skipped:
         return skipped
     validate_prange_kernel_is_scalar_only()
-    try:
-        numba_module.set_num_threads(int(thread_count))
-    except Exception:
-        pass
+    if not is_auto_thread_count(thread_count):
+        try:
+            numba_module.set_num_threads(int(thread_count))
+        except Exception:
+            pass
     globals()["_numba_prange"] = numba_module.prange
     kernel = numba_module.njit(parallel=True, fastmath=True, cache=True)(
         _numba_prange_loop_kernel
@@ -2616,7 +2785,7 @@ def bench_numba_prange_loop(
             "parallel": True,
             "cache": True,
             "kernel_body": "scalar math only",
-            "requested_threads": int(thread_count),
+            "requested_threads": format_thread_count(thread_count),
             "actual_numba_threads": actual_threads,
             "threading_layer": threading_layer,
         },
